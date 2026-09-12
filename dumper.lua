@@ -118,8 +118,10 @@ if haystack then
         for aName, aVal in pairs(c:GetAttributes()) do
             attrStr = attrStr .. string.format(" [%s=%s]", tostring(aName), tostring(aVal))
         end
+        local colStr = c:IsA("BasePart") and tostring(c.Color) or "N/A"
+        local matStr = c:IsA("BasePart") and tostring(c.Material) or "N/A"
         out(string.format("  [%d] Name: %s | Class: %s | Color: %s | Material: %s | Attrs: %s",
-            i, c.Name, c.ClassName, tostring(c.Color), tostring(c.Material), attrStr))
+            i, c.Name, c.ClassName, colStr, matStr, attrStr))
     end
 
     -- Scan for RAINBOW / RGB / UNUSUAL HAY
@@ -186,15 +188,29 @@ if gemsClient then
     out("Total GemsClient children: " .. tostring(#gemChildren))
     for i, g in ipairs(gemChildren) do
         local attrStr = ""
-        for aName, aVal in pairs(g:GetAttributes()) do
-            attrStr = attrStr .. string.format(" [%s=%s]", tostring(aName), tostring(aVal))
-        end
+        pcall(function()
+            for aName, aVal in pairs(g:GetAttributes()) do
+                attrStr = attrStr .. string.format(" [%s=%s]", tostring(aName), tostring(aVal))
+            end
+        end)
         local kidStr = ""
-        for _, k in ipairs(g:GetChildren()) do
-            kidStr = kidStr .. " " .. k.ClassName .. ":" .. k.Name
+        pcall(function()
+            for _, k in ipairs(g:GetChildren()) do
+                kidStr = kidStr .. " " .. k.ClassName .. ":" .. k.Name
+            end
+        end)
+        local posStr = "N/A"
+        local colorStr = "N/A"
+        if g:IsA("BasePart") then
+            posStr = tostring(g.Position)
+            colorStr = tostring(g.Color)
+        elseif g:IsA("Model") then
+            pcall(function() posStr = tostring(g:GetPivot().Position) end)
+        elseif g:IsA("Highlight") then
+            colorStr = string.format("Fill:%s, Outline:%s, Adornee:%s", tostring(g.FillColor), tostring(g.OutlineColor), tostring(g.Adornee))
         end
         out(string.format("  [%d] Name: %s | Class: %s | Pos: %s | Color: %s | Attrs: %s | Kids: %s",
-            i, g.Name, g.ClassName, tostring(g.Position), tostring(g.Color), attrStr, kidStr))
+            i, g.Name, g.ClassName, posStr, colorStr, attrStr, kidStr))
     end
 else
     out("GemsClient folder not found in Workspace.")
@@ -208,7 +224,13 @@ if droppedHay then
     local dChildren = droppedHay:GetChildren()
     out("DroppedHay children: " .. tostring(#dChildren))
     for i, d in ipairs(dChildren) do
-        out(string.format("  [%d] Name: %s | Class: %s | Pos: %s", i, d.Name, d.ClassName, tostring(d.Position)))
+        local posStr = "N/A"
+        if d:IsA("BasePart") then
+            posStr = tostring(d.Position)
+        elseif d:IsA("Model") then
+            pcall(function() posStr = tostring(d:GetPivot().Position) end)
+        end
+        out(string.format("  [%d] Name: %s | Class: %s | Pos: %s", i, d.Name, d.ClassName, posStr))
     end
 else
     out("DroppedHay folder not found.")
