@@ -472,8 +472,45 @@ end
 
 -- SECTION 8: AUTOMATION ENGINES
 
--- 8.1 FAST BATCH AUTO-FARM ENGINE (MULTI-GRAB + RGB PRIORITY + AUTO-SELL)
+-- 8.1 FAST BATCH AUTO-FARM ENGINE (FULL RGB HUNTING + MULTI-GRAB + AUTO-SELL)
 local isCurrentlySelling = false
+local recentlyAttemptedStrands = {}
+
+-- Function to find ALL active Rainbow / RGB strands across the entire map
+local function getAllRainbowStrands()
+    local haystack = workspace:FindFirstChild("HaystackClient")
+    local rgbList = {}
+    local now = os.clock()
+
+    -- 1. Check all strands in HaystackClient (no limits / full map scan)
+    if haystack then
+        for _, p in ipairs(haystack:GetChildren()) do
+            if p:IsA("BasePart") and p.Parent == haystack then
+                local hayId = p:GetAttribute("HayId")
+                if hayId then
+                    local attempt = recentlyAttemptedStrands[hayId]
+                    if not attempt or (now - attempt.time) > 2.5 or attempt.count < 3 then
+                        if isRainbowStrand(p) then
+                            table.insert(rgbList, p)
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    -- 2. Check all strands in DroppedHay for rainbow pieces
+    local dropped = workspace:FindFirstChild("DroppedHay")
+    if dropped then
+        for _, d in ipairs(dropped:GetChildren()) do
+            if d:IsA("BasePart") and isRainbowStrand(d) then
+                table.insert(rgbList, d)
+            end
+        end
+    end
+
+    return rgbList
+end
 
 local farmThread = task.spawn(function()
     while IsHubLoaded do
@@ -523,63 +560,85 @@ local farmThread = task.spawn(function()
                     local myPos = hrp.Position
                     local haystack = workspace:FindFirstChild("HaystackClient")
 
-                    if haystack then
-                        local children = haystack:GetChildren()
-                        local total = #children
+                    -- 1. FULL RAINBOW HUNTING
+                    local rgbStrands = {}
+                    if HubState.PrioritizeRGB then
+                        rgbStrands = getAllRainbowStrands()
+                    end
 
-                        -- 1. SCAN FOR RAINBOW / RGB STRAWS FIRST
-                        local targetRainbowPart = nil
-                        if HubState.PrioritizeRGB and total > 0 then
-                            for i = 1, math.min(total, 400) do
-                                local p = children[i]
-                                if p and p:IsA("BasePart") and isRainbowStrand(p) then
-                                    targetRainbowPart = p
-                                    break
-                                end
+                    if #rgbStrands > 0 then
+                        -- Sort by distance to player: harvest closest RGB first
+                        table.sort(rgbStrands, function(a, b)
+                            return (a.Position - myPos).Magnitude < (b.Position - myPos).Magnitude
+                        end)
+
+                        local targetRgb = rgbStrands[1]
+                        local targetPos = targetRgb.Position
+                        local rId = targetRgb:GetAttribute("HayId")
+
+                        -- Teleport player directly ON TOP of the RGB strand
+                        hrp.CFrame = CFrame.new(targetPos + Vector3.new(0, 0.6, 0))
+                        task.wait(0.04)
+
+                        if targetRgb.Parent and targetRgb.Parent.Name == "DroppedHay" then
+                            if Remotes.PickDroppedHay then
+                                pcall(function() Remotes.PickDroppedHay:FireServer(targetRgb) end)
                             end
+                        elseif rId and Remotes.PickHay then
+                            LocalPlayer:SetAttribute("HoveredHayId", rId)
+                            local candidates = getGrabCandidates(targetRgb)
+
+                            -- Track attempt
+                            local now = os.clock()
+                            if not recentlyAttemptedStrands[rId] then
+                                recentlyAttemptedStrands[rId] = {time = now, count = 1}
+                            else
+                                recentlyAttemptedStrands[rId].time = now
+                                recentlyAttemptedStrands[rId].count = recentlyAttemptedStrands[rId].count + 1
+                            end
+
+                            pcall(function()
+                                Remotes.PickHay:FireServer(rId, candidates)
+                            end)
+                            addLog("info", string.format("FOCUSED RGB straw [%s] (+%d batch) | %d RGBs remaining on field",
+                                tostring(rId), #candidates, #rgbStrands))
                         end
 
-                        -- IF RAINBOW FOUND: TELEPORT & HARVEST WITH FULL CANDIDATES
-                        if targetRainbowPart then
-                            local rId = targetRainbowPart:GetAttribute("HayId")
-                            if rId and Remotes.PickHay then
-                                -- Teleport close to rainbow straw to satisfy server distance check
-                                teleportTo(targetRainbowPart.Position + Vector3.new(0, 1.5, 0))
-                                task.wait(0.04)
-
-                                local candidates = getGrabCandidates(targetRainbowPart)
-                                pcall(function()
-                                    Remotes.PickHay:FireServer(rId, candidates)
-                                end)
-                                addLog("info", "Harvested RAINBOW straw [" .. rId .. "] + " .. #candidates .. " batch!")
-                            end
-                        else
-                            -- 2. NORMAL HAY BATCH HARVESTING
+                        if Remotes.PitchforkDig then
+                            pcall(function() Remotes.PitchforkDig:FireServer(targetPos) end)
+                        end
+                    else
+                        -- 2. NORMAL HAY HARVESTING (when 0 RGB straws remain on field)
+                        if haystack then
+                            local children = haystack:GetChildren()
                             local primaryPart = nil
                             local minDistance = 9999
 
-                            if total > 0 then
-                                for i = 1, math.min(total, 120) do
-                                    local p = children[i]
-                                    if p and p:IsA("BasePart") then
-                                        local dist = (p.Position - myPos).Magnitude
-                                        if dist < minDistance then
-                                            minDistance = dist
-                                            primaryPart = p
-                                        end
+                            -- First check if a strand is already right next to the player (fast O(1))
+                            for _, p in ipairs(children) do
+                                if p:IsA("BasePart") and p.Parent == haystack then
+                                    local dist = (p.Position - myPos).Magnitude
+                                    if dist < 4.5 then
+                                        primaryPart = p
+                                        minDistance = dist
+                                        break
+                                    elseif dist < minDistance then
+                                        minDistance = dist
+                                        primaryPart = p
                                     end
                                 end
                             end
 
                             if primaryPart then
-                                -- If too far, teleport onto the haystack
-                                if minDistance > 16 then
-                                    teleportTo(primaryPart.Position + Vector3.new(0, 1.8, 0))
+                                -- If more than 8 studs away, teleport directly onto it
+                                if minDistance > 8 then
+                                    hrp.CFrame = CFrame.new(primaryPart.Position + Vector3.new(0, 0.6, 0))
                                     task.wait(0.04)
                                 end
 
                                 local pId = primaryPart:GetAttribute("HayId")
                                 if pId and Remotes.PickHay then
+                                    LocalPlayer:SetAttribute("HoveredHayId", pId)
                                     local candidates = getGrabCandidates(primaryPart)
                                     pcall(function()
                                         Remotes.PickHay:FireServer(pId, candidates)
@@ -587,18 +646,18 @@ local farmThread = task.spawn(function()
                                 end
                             end
                         end
-                    end
 
-                    -- Burst tool actions if available
-                    if Remotes.PitchforkDig then
-                        pcall(function() Remotes.PitchforkDig:FireServer(myPos - Vector3.new(0, 2.0, 0)) end)
-                    end
-                    if Remotes.PickDroppedHay then
-                        local dropped = workspace:FindFirstChild("DroppedHay")
-                        if dropped then
-                            for _, d in ipairs(dropped:GetChildren()) do
-                                if d:IsA("BasePart") and (d.Position - myPos).Magnitude <= 20 then
-                                    pcall(function() Remotes.PickDroppedHay:FireServer(d) end)
+                        -- Pitchfork Burst
+                        if Remotes.PitchforkDig then
+                            pcall(function() Remotes.PitchforkDig:FireServer(myPos - Vector3.new(0, 2.0, 0)) end)
+                        end
+                        if Remotes.PickDroppedHay then
+                            local dropped = workspace:FindFirstChild("DroppedHay")
+                            if dropped then
+                                for _, d in ipairs(dropped:GetChildren()) do
+                                    if d:IsA("BasePart") and (d.Position - myPos).Magnitude <= 20 then
+                                        pcall(function() Remotes.PickDroppedHay:FireServer(d) end)
+                                    end
                                 end
                             end
                         end
