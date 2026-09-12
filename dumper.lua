@@ -332,15 +332,15 @@ end
 -- ============================================================
 -- SCANNER DE WORKSPACE (PARTES INTERATIVAS)
 -- ============================================================
+local touchParts = {}
+local proximityPrompts = {}
+local clickDetectors = {}
+local npcs = {}
+local spawnLocations = {}
+local folders = {}
+
 if SCAN_WORKSPACE and Workspace then
     section("WORKSPACE - PARTES INTERATIVAS E ESTRUTURA 3D")
-
-    local touchParts = {}
-    local proximityPrompts = {}
-    local clickDetectors = {}
-    local npcs = {}
-    local spawnLocations = {}
-    local folders = {}
 
     local function scanWorkspace(parent, depth)
         if depth > MAX_DEPTH then return end
