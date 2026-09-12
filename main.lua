@@ -332,6 +332,8 @@ local HubState = {
     AutoWinNeedle = true,
     AutoDeployDrone = true,
     AutoBuyUpgrades = false,
+    AutoEquipBestTool = true,
+    ForcedToolSlot = 0,
     FarmCooldown = 0.35,
 
     -- Player Mods
@@ -358,6 +360,141 @@ local HubState = {
     AutoRollClass = false,
     TargetClass = "Ultimate Farmer",
 }
+
+-- TOOL SLOTS & INTELLIGENT RECOGNITION SYSTEM
+local SLOT_HAND = 1
+local SLOT_TNT = 2
+local SLOT_PITCHFORK = 3
+local SLOT_DRONE = 4
+local SLOT_VACUUM = 5
+local SLOT_NEEDLE = 6
+
+local ToolNames = {
+    [1] = "Hand",
+    [2] = "TNT",
+    [3] = "Pitchfork",
+    [4] = "Drone",
+    [5] = "Vacuum",
+    [6] = "The Needle"
+}
+
+local CachedHotbarSlots = nil
+local function getHotbarSlots()
+    if CachedHotbarSlots then return CachedHotbarSlots end
+    local ps = LocalPlayer:FindFirstChild("PlayerScripts")
+    if ps then
+        local mod = ps:FindFirstChild("HotbarSlots")
+        if mod and mod:IsA("ModuleScript") then
+            local ok, res = pcall(require, mod)
+            if ok and type(res) == "table" then
+                CachedHotbarSlots = res
+                return res
+            end
+        end
+    end
+    return nil
+end
+
+local function getCurrentEquippedSlot()
+    local hotbar = getHotbarSlots()
+    if hotbar and type(hotbar.getEquipped) == "function" then
+        local ok, slot = pcall(hotbar.getEquipped)
+        if ok and type(slot) == "number" then
+            return slot
+        end
+    end
+    local attr = LocalPlayer:GetAttribute("NeedleEquippedSlot")
+    if type(attr) == "number" then
+        return attr
+    end
+    return SLOT_HAND
+end
+
+local function isToolOwned(toolName)
+    if toolName == "Needle" then
+        return LocalPlayer:GetAttribute("NeedleOwned") == true
+    elseif toolName == "Vacuum" then
+        return (LocalPlayer:GetAttribute("VacuumOwned") == true or LocalPlayer:GetAttribute("PermanentVacuumOwned") == true)
+    elseif toolName == "Pitchfork" then
+        return (LocalPlayer:GetAttribute("PitchforkOwned") == true or LocalPlayer:GetAttribute("PermanentPitchforkOwned") == true)
+    elseif toolName == "Tnt" then
+        return (LocalPlayer:GetAttribute("TntOwned") == true or LocalPlayer:GetAttribute("PermanentTntOwned") == true)
+    elseif toolName == "Drone" then
+        return (LocalPlayer:GetAttribute("DroneOwned") == true or LocalPlayer:GetAttribute("PermanentDroneOwned") == true)
+    elseif toolName == "Hand" then
+        return true
+    end
+    return false
+end
+
+local function isVacuumReady()
+    if not isToolOwned("Vacuum") then return false end
+    local overheated = LocalPlayer:GetAttribute("VacuumOverheated") == true
+    local state = LocalPlayer:GetAttribute("VacuumState")
+    if overheated or state == "Overheated" then
+        return false
+    end
+    return true
+end
+
+local function getBestAvailableToolSlot()
+    -- Priority 1: The Needle (Slot 6) - Win condition!
+    if isToolOwned("Needle") then
+        return SLOT_NEEDLE, "The Needle"
+    end
+
+    -- Manual Override
+    if HubState.ForcedToolSlot and HubState.ForcedToolSlot > 0 then
+        local forced = HubState.ForcedToolSlot
+        return forced, ToolNames[forced] or ("Slot " .. tostring(forced))
+    end
+
+    -- Priority 2: Vacuum (Slot 5) - Top tier harvester (5 batch + rapid suction)
+    if isVacuumReady() then
+        return SLOT_VACUUM, "Vacuum"
+    end
+
+    -- Priority 3: Pitchfork (Slot 3) - High power scoop & reach
+    if isToolOwned("Pitchfork") then
+        return SLOT_PITCHFORK, "Pitchfork"
+    end
+
+    -- Priority 4: Hand (Slot 1) - Default fallback
+    return SLOT_HAND, "Hand"
+end
+
+local lastEquippedSlotLogged = -1
+local function equipToolSlot(slotIndex, silent)
+    if not slotIndex or type(slotIndex) ~= "number" then return end
+    pcall(function()
+        LocalPlayer:SetAttribute("NeedleEquippedSlot", slotIndex)
+    end)
+    local hotbar = getHotbarSlots()
+    if hotbar and type(hotbar.setEquipped) == "function" then
+        pcall(function()
+            hotbar.setEquipped(slotIndex, false)
+        end)
+    end
+    if not silent and lastEquippedSlotLogged ~= slotIndex then
+        lastEquippedSlotLogged = slotIndex
+        local tName = ToolNames[slotIndex] or ("Slot " .. tostring(slotIndex))
+        addLog("info", "Equipped Tool: " .. tName .. " (Slot " .. slotIndex .. ")")
+    end
+end
+
+local function getToolStatusSummary()
+    local curSlot = getCurrentEquippedSlot()
+    local curName = ToolNames[curSlot] or ("Slot " .. tostring(curSlot))
+    local bestSlot, bestName = getBestAvailableToolSlot()
+
+    local vOwned = isToolOwned("Vacuum") and (isVacuumReady() and "YES" or "OVERHEATED") or "NO"
+    local pOwned = isToolOwned("Pitchfork") and "YES" or "NO"
+    local tOwned = isToolOwned("Tnt") and "YES" or "NO"
+    local dOwned = isToolOwned("Drone") and (LocalPlayer:GetAttribute("DroneDeployed") == true and "DEPLOYED" or "YES") or "NO"
+
+    return string.format("Active: [%s] (Slot %d) | Best: [%s]\nOwned: Vacuum: %s | Pitchfork: %s | TNT: %s | Drone: %s",
+        curName, curSlot, bestName, vOwned, pOwned, tOwned, dOwned)
+end
 
 local function getHayHeld()
     local val = LocalPlayer:GetAttribute("HayHeld")
@@ -557,10 +694,27 @@ local farmThread = task.spawn(function()
 
                     isCurrentlySelling = false
                 else
+                    -- 0. Auto Deploy Drone if owned and not deployed
+                    if HubState.AutoDeployDrone and isToolOwned("Drone") and LocalPlayer:GetAttribute("DroneDeployed") ~= true then
+                        if Remotes.DeployDrone then
+                            pcall(function() Remotes.DeployDrone:FireServer() end)
+                        end
+                    end
+
+                    -- 1. Intelligent Tool Recognition & Auto-Equip
+                    local activeSlot = getCurrentEquippedSlot()
+                    if HubState.AutoEquipBestTool then
+                        local bestSlot, bestName = getBestAvailableToolSlot()
+                        if activeSlot ~= bestSlot then
+                            equipToolSlot(bestSlot)
+                            activeSlot = bestSlot
+                        end
+                    end
+
                     local myPos = hrp.Position
                     local haystack = workspace:FindFirstChild("HaystackClient")
 
-                    -- 1. FULL RAINBOW HUNTING
+                    -- 2. FULL RAINBOW HUNTING
                     local rgbStrands = {}
                     if HubState.PrioritizeRGB then
                         rgbStrands = getAllRainbowStrands()
@@ -597,18 +751,30 @@ local farmThread = task.spawn(function()
                                 recentlyAttemptedStrands[rId].count = recentlyAttemptedStrands[rId].count + 1
                             end
 
+                            -- Tool-specific action trigger
+                            if activeSlot == SLOT_PITCHFORK then
+                                if Remotes.PitchforkDig then
+                                    pcall(function() Remotes.PitchforkDig:FireServer(rId) end)
+                                end
+                                if Remotes.HeldToolState then
+                                    pcall(function() Remotes.HeldToolState:FireServer("Pitchfork", "dig") end)
+                                end
+                                pcall(function() LocalPlayer:SetAttribute("PitchforkPhase", "strike") end)
+                            elseif activeSlot == SLOT_VACUUM then
+                                pcall(function() LocalPlayer:SetAttribute("VacuumActive", true) end)
+                                if Remotes.VacuumAction then
+                                    pcall(function() Remotes.VacuumAction:FireServer(targetPos, hrp.CFrame.LookVector) end)
+                                end
+                            end
+
                             pcall(function()
                                 Remotes.PickHay:FireServer(rId, candidates)
                             end)
-                            addLog("info", string.format("FOCUSED RGB straw [%s] (+%d batch) | %d RGBs remaining on field",
-                                tostring(rId), #candidates, #rgbStrands))
-                        end
-
-                        if Remotes.PitchforkDig then
-                            pcall(function() Remotes.PitchforkDig:FireServer(targetPos) end)
+                            addLog("info", string.format("FOCUSED RGB straw [%s] using [%s] (+%d batch) | %d RGBs remaining",
+                                tostring(rId), ToolNames[activeSlot] or "Hand", #candidates, #rgbStrands))
                         end
                     else
-                        -- 2. NORMAL HAY HARVESTING (when 0 RGB straws remain on field)
+                        -- 3. NORMAL HAY HARVESTING (when 0 RGB straws remain on field)
                         if haystack then
                             local children = haystack:GetChildren()
                             local primaryPart = nil
@@ -640,6 +806,23 @@ local farmThread = task.spawn(function()
                                 if pId and Remotes.PickHay then
                                     LocalPlayer:SetAttribute("HoveredHayId", pId)
                                     local candidates = getGrabCandidates(primaryPart)
+
+                                    -- Tool-specific action trigger
+                                    if activeSlot == SLOT_PITCHFORK then
+                                        if Remotes.PitchforkDig then
+                                            pcall(function() Remotes.PitchforkDig:FireServer(pId) end)
+                                        end
+                                        if Remotes.HeldToolState then
+                                            pcall(function() Remotes.HeldToolState:FireServer("Pitchfork", "dig") end)
+                                        end
+                                        pcall(function() LocalPlayer:SetAttribute("PitchforkPhase", "strike") end)
+                                    elseif activeSlot == SLOT_VACUUM then
+                                        pcall(function() LocalPlayer:SetAttribute("VacuumActive", true) end)
+                                        if Remotes.VacuumAction then
+                                            pcall(function() Remotes.VacuumAction:FireServer(primaryPart.Position, hrp.CFrame.LookVector) end)
+                                        end
+                                    end
+
                                     pcall(function()
                                         Remotes.PickHay:FireServer(pId, candidates)
                                     end)
@@ -647,10 +830,6 @@ local farmThread = task.spawn(function()
                             end
                         end
 
-                        -- Pitchfork Burst
-                        if Remotes.PitchforkDig then
-                            pcall(function() Remotes.PitchforkDig:FireServer(myPos - Vector3.new(0, 2.0, 0)) end)
-                        end
                         if Remotes.PickDroppedHay then
                             local dropped = workspace:FindFirstChild("DroppedHay")
                             if dropped then
@@ -733,22 +912,11 @@ local needleThread = task.spawn(function()
             local needleOwned = LocalPlayer:GetAttribute("NeedleOwned")
 
             if needleOwned then
-                addLog("warn", "Needle is in your hands! Teleporting to Farmer NPC for victory...")
+                addLog("warn", "Needle is in your hands! Equipping Slot 6 and teleporting to Farmer NPC...")
+                equipToolSlot(SLOT_NEEDLE)
                 scanExactLandmarks()
                 teleportTo(Landmarks.FarmerNPC)
                 task.wait(0.2)
-
-                -- Equip needle tool if in Backpack
-                local char = getCharacter()
-                local bp = LocalPlayer:FindFirstChild("Backpack")
-                if bp and char then
-                    for _, tool in ipairs(bp:GetChildren()) do
-                        if tool:IsA("Tool") and string.find(string.lower(tool.Name), "needle") then
-                            tool.Parent = char
-                            break
-                        end
-                    end
-                end
 
                 -- Fire hand-in remote
                 if Remotes.NeedleHandIn then
@@ -816,29 +984,45 @@ table.insert(HubThreads, needleThread)
 -- 8.4 AUTO DEPLOY DRONE
 local droneThread = task.spawn(function()
     while IsHubLoaded do
-        task.wait(4)
+        task.wait(2.5)
         if HubState.AutoDeployDrone and IS_GAMEPLAY and Remotes.DeployDrone then
-            local deployed = LocalPlayer:GetAttribute("DroneDeployed")
-            if not deployed then
+            if isToolOwned("Drone") and LocalPlayer:GetAttribute("DroneDeployed") ~= true then
                 pcall(function() Remotes.DeployDrone:FireServer() end)
+                addLog("info", "Auto-deployed Hay Drone companion!")
             end
         end
     end
 end)
 table.insert(HubThreads, droneThread)
 
--- 8.5 AUTO-BUY UPGRADES
+-- 8.5 AUTO-BUY TOOLS & UPGRADES
+local upgradeTracks = {
+    "Pitchfork",
+    "Capacity",
+    "HandHold",
+    "VacuumPower",
+    "VacuumRuntime",
+    "VacuumCooling",
+    "PitchforkCooldown",
+    "PitchforkHold",
+    "DroneGrab",
+    "DroneSpeed",
+    "DroneCapacity",
+    "TntLuck",
+    "TntPower",
+    "TntCooldown"
+}
+
 task.spawn(function()
     while IsHubLoaded do
-        task.wait(3)
+        task.wait(2.5)
         if HubState.AutoBuyUpgrades and IS_GAMEPLAY and Remotes.BuyUpgrade then
-            pcall(function()
-                Remotes.BuyUpgrade:FireServer("ExtraTakeAmount")
-                task.wait(0.2)
-                Remotes.BuyUpgrade:FireServer("ExtraHoldAmount")
-                task.wait(0.2)
-                Remotes.BuyUpgrade:FireServer("ExtraHayValuePercentage")
-            end)
+            for _, track in ipairs(upgradeTracks) do
+                pcall(function()
+                    Remotes.BuyUpgrade:FireServer(track)
+                end)
+                task.wait(0.08)
+            end
         end
     end
 end)
@@ -1531,6 +1715,41 @@ local function buildNativeUI()
         btn.MouseButton1Click:Connect(callback)
     end
 
+    local function addNativeParagraph(parent, title, content)
+        local frame = Instance.new("Frame")
+        frame.Size = UDim2.new(0.96, 0, 0, 58)
+        frame.BackgroundColor3 = Color3.fromRGB(24, 24, 34)
+        frame.BorderSizePixel = 0
+        frame.Parent = parent
+        local c = Instance.new("UICorner") c.CornerRadius = UDim.new(0, 6) c.Parent = frame
+
+        local tLbl = Instance.new("TextLabel")
+        tLbl.Size = UDim2.new(1, -16, 0, 18)
+        tLbl.Position = UDim2.fromOffset(8, 4)
+        tLbl.BackgroundTransparency = 1
+        tLbl.Text = title
+        tLbl.TextColor3 = Color3.fromRGB(150, 190, 255)
+        tLbl.Font = Enum.Font.GothamBold
+        tLbl.TextSize = 11
+        tLbl.TextXAlignment = Enum.TextXAlignment.Left
+        tLbl.Parent = frame
+
+        local cLbl = Instance.new("TextLabel")
+        cLbl.Size = UDim2.new(1, -16, 0, 32)
+        cLbl.Position = UDim2.fromOffset(8, 22)
+        cLbl.BackgroundTransparency = 1
+        cLbl.Text = content
+        cLbl.TextColor3 = Color3.fromRGB(210, 210, 220)
+        cLbl.Font = Enum.Font.Gotham
+        cLbl.TextSize = 10
+        cLbl.TextWrapped = true
+        cLbl.TextXAlignment = Enum.TextXAlignment.Left
+        cLbl.TextYAlignment = Enum.TextYAlignment.Top
+        cLbl.Parent = frame
+
+        return cLbl
+    end
+
     local function addNativeSlider(parent, title, min, max, default, callback)
         local frame = Instance.new("Frame")
         frame.Size = UDim2.new(0.96, 0, 0, 50)
@@ -1618,6 +1837,14 @@ local function buildNativeUI()
         HubState.AutoFarmHay = val
         addLog("info", "Auto Farm Hay: " .. tostring(val))
     end)
+    addNativeToggle(farmTab, "Auto-Equip Best Tool (Vacuum/Pitchfork)", HubState.AutoEquipBestTool, function(val)
+        HubState.AutoEquipBestTool = val
+        if val then
+            local bestSlot = getBestAvailableToolSlot()
+            equipToolSlot(bestSlot)
+        end
+        addLog("info", "Auto-Equip Best Tool: " .. tostring(val))
+    end)
     addNativeToggle(farmTab, "Prioritize RGB / Rare Straws (10x Value)", HubState.PrioritizeRGB, function(val)
         HubState.PrioritizeRGB = val
         addLog("info", "Prioritize RGB: " .. tostring(val))
@@ -1637,8 +1864,51 @@ local function buildNativeUI()
     addNativeToggle(farmTab, "Auto Deploy Drone", HubState.AutoDeployDrone, function(val)
         HubState.AutoDeployDrone = val
     end)
-    addNativeToggle(farmTab, "Auto Buy Upgrades", HubState.AutoBuyUpgrades, function(val)
+    addNativeToggle(farmTab, "Auto Buy Tools & Upgrades", HubState.AutoBuyUpgrades, function(val)
         HubState.AutoBuyUpgrades = val
+    end)
+
+    -- Tool Status Display
+    local toolStatusLbl = addNativeParagraph(farmTab, "Tool Recognition Status", getToolStatusSummary())
+    task.spawn(function()
+        while IsHubLoaded do
+            task.wait(1.2)
+            pcall(function()
+                if toolStatusLbl and toolStatusLbl.Parent then
+                    toolStatusLbl.Text = getToolStatusSummary()
+                end
+            end)
+        end
+    end)
+
+    -- Tool Action & Selection Buttons
+    addNativeButton(farmTab, "Auto-Select Best Available Tool", function()
+        HubState.ForcedToolSlot = 0
+        local bestSlot = getBestAvailableToolSlot()
+        equipToolSlot(bestSlot)
+        addLog("info", "Reset tool selection to Auto: Equipped Slot " .. bestSlot)
+    end)
+    addNativeButton(farmTab, "Equip Pitchfork (Slot 3)", function()
+        HubState.ForcedToolSlot = SLOT_PITCHFORK
+        equipToolSlot(SLOT_PITCHFORK)
+    end)
+    addNativeButton(farmTab, "Equip Vacuum (Slot 5)", function()
+        HubState.ForcedToolSlot = SLOT_VACUUM
+        equipToolSlot(SLOT_VACUUM)
+    end)
+    addNativeButton(farmTab, "Equip TNT (Slot 2)", function()
+        HubState.ForcedToolSlot = SLOT_TNT
+        equipToolSlot(SLOT_TNT)
+    end)
+    addNativeButton(farmTab, "Equip Hand (Slot 1)", function()
+        HubState.ForcedToolSlot = SLOT_HAND
+        equipToolSlot(SLOT_HAND)
+    end)
+    addNativeButton(farmTab, "Deploy Drone Now (Slot 4)", function()
+        if Remotes.DeployDrone then
+            pcall(function() Remotes.DeployDrone:FireServer() end)
+            addLog("info", "Fired DeployDrone command")
+        end
     end)
     addNativeButton(farmTab, "Sell Hay Now (Instant Teleport)", function()
         teleportTo(Landmarks.SellCow)
