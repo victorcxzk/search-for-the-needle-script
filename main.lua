@@ -1,7 +1,6 @@
 --[[
-    SEARCH FOR THE NEEDLE - ULTIMATE AUTOMATION HUB v2.0
-    Forensically Engineered & Optimized
-    Place Support: Lobby (77108422251420) & Farmhouse/Basement (108628039999641, 83445806734780)
+    SEARCH FOR THE NEEDLE - ULTIMATE AUTOMATION HUB v3.0
+    Forensically Engineered & Performance Optimized
     Zero Emojis - Full Defensive Programming
 ]]
 
@@ -35,7 +34,6 @@ local RunService = safeService("RunService")
 local UserInputService = safeService("UserInputService")
 local TweenService = safeService("TweenService")
 local TeleportService = safeService("TeleportService")
-local HttpService = safeService("HttpService")
 local CoreGui = safeService("CoreGui")
 
 local LocalPlayer = Players.LocalPlayer
@@ -51,6 +49,11 @@ if not LocalPlayer then
     warn("[Hub Error]: Failed to locate LocalPlayer.")
     return
 end
+
+-- Active Connections Table for Clean Unload
+local HubConnections = {}
+local HubThreads = {}
+local IsHubLoaded = true
 
 -- SECTION 2: PLACE CONTEXT DETECTION
 local CURRENT_PLACE_ID = game.PlaceId
@@ -77,6 +80,7 @@ local LogEntries = {}
 local MAX_LOGS = 80
 
 local function addLog(level, message)
+    if not IsHubLoaded then return end
     local timestamp = os.date("%H:%M:%S")
     local formatted = string.format("[%s] [%s] %s", timestamp, string.upper(level), tostring(message))
     table.insert(LogEntries, formatted)
@@ -86,7 +90,7 @@ local function addLog(level, message)
     print("[NeedleHub] " .. formatted)
 end
 
-addLog("info", "Initialized on " .. GAME_MODE_NAME)
+addLog("info", "Initialized v3.0 on " .. GAME_MODE_NAME)
 
 -- SECTION 4: CHARACTER & MOVEMENT HELPERS
 local function getCharacter()
@@ -124,7 +128,6 @@ end
 
 -- SECTION 5: REMOTE REPOSITORIES (FORENSIC DUMP BINDINGS)
 local Remotes = {
-    -- Gameplay Remotes (NeedleHaystack)
     PickHay = nil,
     PickDroppedHay = nil,
     DropHay = nil,
@@ -158,7 +161,6 @@ local Remotes = {
     GetHayState = nil,
     GetUpgradeState = nil,
 
-    -- Lobby Remotes
     RedeemCode = nil,
     OpenChest = nil,
     EquipPet = nil,
@@ -210,27 +212,21 @@ end
 
 bindRemotes()
 
--- SECTION 6: WORKSPACE LANDMARKS (RESOLVED VIA FORENSIC DUMP)
+-- SECTION 6: WORKSPACE LANDMARKS
 local Landmarks = {
-    -- The Cow / FeedSign where you sell hay in Farmhouse
     SellCow = Vector3.new(-163.37, 5.0, 52.0),
-    -- The Farmer NPC
     FarmerNPC = Vector3.new(-161.05, 5.0, 18.3),
-    -- Center of the Hayfield
     HayCenter = Vector3.new(-190.0, 4.0, 45.0),
-    -- Resolved Needle Location
     NeedleCFrame = nil,
 }
 
 local function scanExactLandmarks()
-    -- Resolve Farmer NPC
     local npcFolder = workspace:FindFirstChild("NPC")
     if npcFolder and npcFolder:FindFirstChild("Farmer_NPC") then
         local root = npcFolder.Farmer_NPC:FindFirstChild("HumanoidRootPart") or npcFolder.Farmer_NPC:FindFirstChildWhichIsA("BasePart")
         if root then Landmarks.FarmerNPC = root.Position end
     end
 
-    -- Resolve Sell Zone / Cow
     local sellModel = workspace:FindFirstChild("SellModel")
     if sellModel then
         local sign = sellModel:FindFirstChild("FeedSign") or sellModel:FindFirstChild("Sign")
@@ -243,7 +239,6 @@ local function scanExactLandmarks()
         end
     end
 
-    -- Resolve Haystack Center
     local haystack = workspace:FindFirstChild("HaystackClient")
     if haystack then
         local firstPart = haystack:FindFirstChildWhichIsA("BasePart")
@@ -252,7 +247,6 @@ local function scanExactLandmarks()
         end
     end
 
-    -- Resolve The Needle
     local needleObj = workspace:FindFirstChild("The Needle") or workspace:FindFirstChild("HiddenNeedleClient")
     if needleObj then
         if needleObj:IsA("BasePart") then
@@ -266,20 +260,21 @@ end
 
 scanExactLandmarks()
 
--- Listen to server events for Needle updates
 if Remotes.NeedleTargetChanged then
-    Remotes.NeedleTargetChanged.OnClientEvent:Connect(function(targetCFrame)
+    local conn = Remotes.NeedleTargetChanged.OnClientEvent:Connect(function(targetCFrame)
         if typeof(targetCFrame) == "CFrame" then
             Landmarks.NeedleCFrame = targetCFrame
             addLog("info", "Needle target location updated by server event")
         end
     end)
+    table.insert(HubConnections, conn)
 end
 
 if Remotes.NeedleFound then
-    Remotes.NeedleFound.OnClientEvent:Connect(function(...)
+    local conn = Remotes.NeedleFound.OnClientEvent:Connect(function(...)
         addLog("info", "Needle found broadcast received!")
     end)
+    table.insert(HubConnections, conn)
 end
 
 -- SECTION 7: GLOBAL HUB STATE
@@ -287,12 +282,13 @@ local HubState = {
     -- Auto Farm
     AutoFarmHay = false,
     FarmMode = "In-Place", -- "In-Place" or "Teleport"
+    DigBurst = 8, -- Digs per cycle (multiplier)
+    FarmDelay = 0.08, -- Fast responsive delay
     AutoSell = true,
-    SellMethod = "Remote", -- "Remote" (no TP) or "Teleport"
-    FarmDelay = 0.15,
+    SellMethod = "Remote", -- "Remote" or "Teleport"
     AutoDeployDrone = true,
     AutoCollectGems = true,
-    AutoWinNeedle = false,
+    AutoWinNeedle = true,
 
     -- Player Mods
     FreeMouse = true,
@@ -317,7 +313,6 @@ local HubState = {
     TargetClass = "Ultimate Farmer",
 }
 
--- Helper to read player attributes from forensic dump:
 local function getHayHeld()
     local val = LocalPlayer:GetAttribute("HayHeld")
     if val and type(val) == "number" then return val end
@@ -330,19 +325,43 @@ local function getHayCapacity()
     return 30
 end
 
-local function getGems()
-    local val = LocalPlayer:GetAttribute("Gems")
-    if val and type(val) == "number" then return val end
-    return 0
+-- Helper: Auto-Equip Pitchfork
+local function ensurePitchforkEquipped(char)
+    local tool = char:FindFirstChildOfClass("Tool")
+    if tool then return tool end
+
+    local backpack = LocalPlayer:FindFirstChild("Backpack")
+    if backpack then
+        local pf = backpack:FindFirstChild("Pitchfork") or backpack:FindFirstChildWhichIsA("Tool")
+        if pf then
+            local hum = getHumanoid()
+            if hum then hum:EquipTool(pf) end
+            return pf
+        end
+    end
+    return nil
 end
 
--- SECTION 8: FEATURE IMPLEMENTATIONS
+-- Helper: Snap camera to 3rd person
+local function forceSnap3rdPerson(distance)
+    pcall(function()
+        local dist = distance or 16
+        LocalPlayer.CameraMode = Enum.CameraMode.Classic
+        LocalPlayer.CameraMaxZoomDistance = 300
+        LocalPlayer.CameraMinZoomDistance = dist
+        task.wait(0.05)
+        LocalPlayer.CameraMinZoomDistance = 0.5
+        addLog("info", "Snapped camera to 3rd person (" .. dist .. " studs)")
+    end)
+end
 
--- 8.1 AUTO-FARM ENGINE (NO ARTIFICIAL COUNTER, NO SEIZURE TELEPORT)
+-- SECTION 8: AUTOMATION ENGINES
+
+-- 8.1 FAST MULTI-DIG AUTO-FARM ENGINE
 local isCurrentlySelling = false
 
-task.spawn(function()
-    while true do
+local farmThread = task.spawn(function()
+    while IsHubLoaded do
         task.wait(HubState.FarmDelay)
 
         if HubState.AutoFarmHay and IS_GAMEPLAY and not isCurrentlySelling then
@@ -353,63 +372,74 @@ task.spawn(function()
                 local currentHay = getHayHeld()
                 local maxCap = getHayCapacity()
 
-                -- CHECK IF BAG IS ACTUALLY FULL
+                -- FULL BAG CHECK
                 if currentHay >= maxCap and maxCap > 0 and HubState.AutoSell then
                     isCurrentlySelling = true
-                    addLog("info", "Bag full (" .. currentHay .. "/" .. maxCap .. "). Selling hay...")
+                    addLog("info", "Bag full (" .. currentHay .. "/" .. maxCap .. "). Selling...")
 
                     if HubState.SellMethod == "Remote" then
-                        -- Method A: Remote Sell without moving
                         if Remotes.SellHay then
                             pcall(function() Remotes.SellHay:FireServer() end)
                         end
-                        task.wait(0.5)
+                        task.wait(0.4)
 
-                        -- If remote sell didn't reset HayHeld, fallback to quick teleport
                         if getHayHeld() >= maxCap and Landmarks.SellCow then
                             local returnPos = hrp.CFrame
                             teleportTo(Landmarks.SellCow)
                             task.wait(0.35)
-                            if Remotes.SellHay then
-                                pcall(function() Remotes.SellHay:FireServer() end)
-                            end
-                            task.wait(0.4)
+                            if Remotes.SellHay then pcall(function() Remotes.SellHay:FireServer() end) end
+                            task.wait(0.35)
                             teleportTo(returnPos)
                         end
                     else
-                        -- Method B: Teleport Sell
                         if Landmarks.SellCow then
                             local returnPos = hrp.CFrame
                             teleportTo(Landmarks.SellCow)
                             task.wait(0.35)
-                            if Remotes.SellHay then
-                                pcall(function() Remotes.SellHay:FireServer() end)
-                            end
-                            task.wait(0.4)
+                            if Remotes.SellHay then pcall(function() Remotes.SellHay:FireServer() end) end
+                            task.wait(0.35)
                             teleportTo(returnPos)
                         end
                     end
 
                     isCurrentlySelling = false
                 else
-                    -- HARVEST HAY
-                    -- If Teleport mode enabled, ensure player is near hay field
+                    -- HARVEST HAY (MULTI-DIG BURST)
                     if HubState.FarmMode == "Teleport" and Landmarks.HayCenter then
                         local dist = (hrp.Position - Landmarks.HayCenter).Magnitude
                         if dist > 35 then
                             teleportTo(Landmarks.HayCenter)
-                            task.wait(0.2)
+                            task.wait(0.15)
                         end
                     end
 
-                    -- Multi-Method Harvest:
-                    -- 1. Swing Pitchfork tool if equipped or in character
-                    local tool = char:FindFirstChildOfClass("Tool")
+                    -- Ensure Tool is Equipped & Activated
+                    local tool = ensurePitchforkEquipped(char)
                     if tool then
                         pcall(function() tool:Activate() end)
                     end
 
-                    -- 2. Read HoveredHayId if raycaster hovered over a strand
+                    -- Raycast to exact surface hit position
+                    local rayParams = RaycastParams.new()
+                    rayParams.FilterDescendantsInstances = {char}
+                    rayParams.FilterType = Enum.RaycastFilterType.Exclude
+                    local hit = workspace:Raycast(hrp.Position, Vector3.new(0, -12, 0), rayParams)
+                    local baseHitPos = hit and hit.Position or (hrp.Position - Vector3.new(0, 2.5, 0))
+
+                    -- Multi-Strand Burst Collection
+                    local burst = HubState.DigBurst or 8
+                    for i = 1, burst do
+                        local angle = (i / burst) * math.pi * 2
+                        local radius = (i % 3 + 1) * 1.2
+                        local offset = Vector3.new(math.cos(angle) * radius, 0, math.sin(angle) * radius)
+                        local targetPos = baseHitPos + offset
+
+                        if Remotes.PitchforkDig then
+                            pcall(function() Remotes.PitchforkDig:FireServer(targetPos) end)
+                        end
+                    end
+
+                    -- Pick Hovered Strand if any
                     local hoveredId = LocalPlayer:GetAttribute("HoveredHayId")
                     if hoveredId and type(hoveredId) == "number" and hoveredId > 0 then
                         if Remotes.PickHay then
@@ -417,19 +447,11 @@ task.spawn(function()
                         end
                     end
 
-                    -- 3. PitchforkDig at ground level
-                    if Remotes.PitchforkDig then
-                        pcall(function()
-                            Remotes.PitchforkDig:FireServer(hrp.Position - Vector3.new(0, 2.5, 0))
-                        end)
-                    end
-
-                    -- 4. Pick dropped hay
+                    -- Vacuum Dropped Hay Pieces
                     if Remotes.PickDroppedHay then
                         pcall(function() Remotes.PickDroppedHay:FireServer() end)
                     end
 
-                    -- 5. Set tool state to dig
                     if Remotes.HeldToolState then
                         pcall(function() Remotes.HeldToolState:FireServer("Pitchfork", "dig") end)
                     end
@@ -438,10 +460,68 @@ task.spawn(function()
         end
     end
 end)
+table.insert(HubThreads, farmThread)
 
--- 8.2 AUTO DEPLOY DRONE
-task.spawn(function()
-    while true do
+-- 8.2 AUTO-WIN NEEDLE (Instant Pickup & Farmer Hand-In)
+local needleThread = task.spawn(function()
+    while IsHubLoaded do
+        task.wait(0.6)
+        if HubState.AutoWinNeedle and IS_GAMEPLAY then
+            local needleOwned = LocalPlayer:GetAttribute("NeedleOwned")
+
+            if needleOwned then
+                addLog("info", "Needle is in your hands! Delivering to Farmer for VICTORY...")
+                teleportTo(Landmarks.FarmerNPC)
+                task.wait(0.35)
+                if Remotes.NeedleHandIn then
+                    pcall(function() Remotes.NeedleHandIn:FireServer() end)
+                    addLog("info", "Needle handed in! Round Finished!")
+                end
+            else
+                local needle = workspace:FindFirstChild("The Needle") or workspace:FindFirstChild("HiddenNeedleClient")
+                if needle then
+                    local needlePart = nil
+                    if needle:IsA("BasePart") then needlePart = needle
+                    elseif needle:IsA("Model") then needlePart = needle.PrimaryPart or needle:FindFirstChildWhichIsA("BasePart") end
+
+                    if needlePart then
+                        addLog("info", "Needle spawned! Teleporting directly to it...")
+                        local hrp = getHRP()
+                        if hrp then
+                            hrp.CFrame = CFrame.new(needlePart.Position + Vector3.new(0, 1.2, 0))
+                            task.wait(0.15)
+                            if firetouchinterest then
+                                pcall(function()
+                                    firetouchinterest(hrp, needlePart, 0)
+                                    task.wait(0.05)
+                                    firetouchinterest(hrp, needlePart, 1)
+                                end)
+                            end
+                            if Remotes.PickHay then
+                                pcall(function() Remotes.PickHay:FireServer(needlePart.Position) end)
+                            end
+                            if Remotes.PickDroppedHay then
+                                pcall(function() Remotes.PickDroppedHay:FireServer() end)
+                            end
+                        end
+                    end
+                elseif Landmarks.NeedleCFrame then
+                    local hrp = getHRP()
+                    if hrp then
+                        hrp.CFrame = Landmarks.NeedleCFrame + Vector3.new(0, 1.2, 0)
+                        task.wait(0.15)
+                        if Remotes.PickHay then pcall(function() Remotes.PickHay:FireServer(Landmarks.NeedleCFrame.Position) end) end
+                    end
+                end
+            end
+        end
+    end
+end)
+table.insert(HubThreads, needleThread)
+
+-- 8.3 AUTO DEPLOY DRONE
+local droneThread = task.spawn(function()
+    while IsHubLoaded do
         task.wait(4)
         if HubState.AutoDeployDrone and IS_GAMEPLAY and Remotes.DeployDrone then
             local deployed = LocalPlayer:GetAttribute("DroneDeployed")
@@ -451,10 +531,11 @@ task.spawn(function()
         end
     end
 end)
+table.insert(HubThreads, droneThread)
 
--- 8.3 AUTO COLLECT GEMS
-task.spawn(function()
-    while true do
+-- 8.4 AUTO COLLECT GEMS
+local gemThread = task.spawn(function()
+    while IsHubLoaded do
         task.wait(1.2)
         if HubState.AutoCollectGems and IS_GAMEPLAY and Remotes.CollectGem then
             local hrp = getHRP()
@@ -471,86 +552,50 @@ task.spawn(function()
         end
     end
 end)
+table.insert(HubThreads, gemThread)
 
 if Remotes.GemSpawned then
-    Remotes.GemSpawned.OnClientEvent:Connect(function(gemObj)
+    local conn = Remotes.GemSpawned.OnClientEvent:Connect(function(gemObj)
         if HubState.AutoCollectGems and Remotes.CollectGem and gemObj then
             pcall(function() Remotes.CollectGem:FireServer(gemObj) end)
         end
     end)
+    table.insert(HubConnections, conn)
 end
 
--- 8.4 AUTO-WIN NEEDLE (Locate -> Teleport -> HandIn)
-task.spawn(function()
-    while true do
-        task.wait(1)
-        if HubState.AutoWinNeedle and IS_GAMEPLAY then
-            local needleOwned = LocalPlayer:GetAttribute("NeedleOwned")
-
-            if needleOwned then
-                -- Player has the needle! Deliver it to the farmer!
-                addLog("info", "Needle is in your inventory! Delivering to Farmer...")
-                teleportTo(Landmarks.FarmerNPC)
-                task.wait(0.4)
-                if Remotes.NeedleHandIn then
-                    pcall(function() Remotes.NeedleHandIn:FireServer() end)
-                    addLog("info", "Delivered needle to Farmer! Victory!")
-                end
-            else
-                -- Find needle in workspace
-                local needle = workspace:FindFirstChild("The Needle") or workspace:FindFirstChild("HiddenNeedleClient")
-                if needle then
-                    local pos = nil
-                    if needle:IsA("BasePart") then pos = needle.Position
-                    elseif needle:IsA("Model") and needle.PrimaryPart then pos = needle.PrimaryPart.Position
-                    else
-                        local p = needle:FindFirstChildWhichIsA("BasePart")
-                        if p then pos = p.Position end
-                    end
-
-                    if pos then
-                        addLog("info", "Needle found in map! Teleporting to it...")
-                        teleportTo(pos)
-                        task.wait(0.3)
-                        -- Try grabbing needle
-                        if Remotes.PickHay then pcall(function() Remotes.PickHay:FireServer(pos) end) end
-                    end
-                elseif Landmarks.NeedleCFrame then
-                    addLog("info", "Teleporting to broadcasted Needle position...")
-                    teleportTo(Landmarks.NeedleCFrame)
-                end
-            end
-        end
-    end
-end)
-
--- 8.5 CAMERA & MOUSE UNLOCKER (Continuous First-Person Breaker)
+-- 8.5 CAMERA & MOUSE UNLOCKER (FIXED FOR 3RD PERSON ROTATION)
 local function applyCameraAndMouse()
     if HubState.UnlockCamera then
         if LocalPlayer.CameraMode ~= Enum.CameraMode.Classic then
             LocalPlayer.CameraMode = Enum.CameraMode.Classic
         end
         if LocalPlayer.CameraMaxZoomDistance < 100 then
-            LocalPlayer.CameraMaxZoomDistance = 250
+            LocalPlayer.CameraMaxZoomDistance = 300
             LocalPlayer.CameraMinZoomDistance = 0.5
         end
     end
 
+    -- FIX: Only force Default cursor when player is NOT holding Right Mouse Button!
+    -- When holding RMB, Roblox needs to lock cursor to rotate 3rd person camera!
     if HubState.FreeMouse then
-        UserInputService.MouseBehavior = Enum.MouseBehavior.Default
-        UserInputService.MouseIconEnabled = true
+        local isHoldingRMB = UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
+        if not isHoldingRMB then
+            UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+            UserInputService.MouseIconEnabled = true
+        end
     end
 end
 
 -- Hotkey: LeftAlt or Insert to toggle Free Mouse
-UserInputService.InputBegan:Connect(function(input, gpe)
+local hotkeyConn = UserInputService.InputBegan:Connect(function(input, gpe)
     if not gpe and (input.KeyCode == Enum.KeyCode.LeftAlt or input.KeyCode == Enum.KeyCode.Insert) then
         HubState.FreeMouse = not HubState.FreeMouse
-        addLog("info", "Free Mouse toggled: " .. (HubState.FreeMouse and "ON (Unlocked)" or "OFF (Locked)"))
+        addLog("info", "Mouse Mode: " .. (HubState.FreeMouse and "FREE (Click UI)" or "LOCKED (Game Camera)"))
     end
 end)
+table.insert(HubConnections, hotkeyConn)
 
--- 8.6 FLY SYSTEM (Smooth Directional Physics)
+-- 8.6 FLY SYSTEM
 local flyBodyVelocity = nil
 local flyBodyGyro = nil
 
@@ -577,7 +622,8 @@ local function toggleFly(enable)
     end
 end
 
-RunService.RenderStepped:Connect(function()
+local renderConn = RunService.RenderStepped:Connect(function()
+    if not IsHubLoaded then return end
     applyCameraAndMouse()
 
     local char = LocalPlayer.Character
@@ -585,17 +631,14 @@ RunService.RenderStepped:Connect(function()
     local hum = char:FindFirstChildOfClass("Humanoid")
     local hrp = char:FindFirstChild("HumanoidRootPart")
 
-    -- Speed Modifier
     if hum and HubState.WalkSpeedEnabled then
         hum.WalkSpeed = HubState.WalkSpeed
     end
 
-    -- Jump Modifier
     if hum and HubState.JumpHeightEnabled then
         hum.JumpHeight = HubState.JumpHeight
     end
 
-    -- Fly Mechanics
     if HubState.FlyEnabled and hrp and flyBodyVelocity and flyBodyGyro then
         local cam = workspace.CurrentCamera
         local moveDir = Vector3.new(0, 0, 0)
@@ -615,9 +658,11 @@ RunService.RenderStepped:Connect(function()
         flyBodyGyro.CFrame = cam.CFrame
     end
 end)
+table.insert(HubConnections, renderConn)
 
 -- Noclip loop
-RunService.Stepped:Connect(function()
+local noclipConn = RunService.Stepped:Connect(function()
+    if not IsHubLoaded then return end
     if HubState.NoclipEnabled or HubState.FlyEnabled then
         local char = LocalPlayer.Character
         if char then
@@ -629,16 +674,19 @@ RunService.Stepped:Connect(function()
         end
     end
 end)
+table.insert(HubConnections, noclipConn)
 
 -- Infinite Jump
-UserInputService.JumpRequest:Connect(function()
+local jumpConn = UserInputService.JumpRequest:Connect(function()
+    if not IsHubLoaded then return end
     if HubState.InfiniteJump then
         local hum = getHumanoid()
         if hum then hum:ChangeState(Enum.HumanoidStateType.Jumping) end
     end
 end)
+table.insert(HubConnections, jumpConn)
 
--- 8.7 ESP SYSTEM (Needle, Gems, Players, Sell Zone)
+-- 8.7 ESP SYSTEM
 local ESPFolder = Instance.new("Folder")
 ESPFolder.Name = "NeedleHub_ESP"
 pcall(function() ESPFolder.Parent = CoreGui or workspace end)
@@ -690,7 +738,6 @@ local function removeBillboard(key)
     end
 end
 
--- Persistent Sell Target Part
 local sellAnchorPart = Instance.new("Part")
 sellAnchorPart.Name = "SellAnchorPart"
 sellAnchorPart.Size = Vector3.new(2, 2, 2)
@@ -700,13 +747,12 @@ sellAnchorPart.Anchored = true
 sellAnchorPart.CanCollide = false
 sellAnchorPart.Parent = ESPFolder
 
-task.spawn(function()
-    while true do
+local espThread = task.spawn(function()
+    while IsHubLoaded do
         task.wait(0.5)
         local myHRP = getHRP()
         local myPos = myHRP and myHRP.Position or Vector3.new(0, 0, 0)
 
-        -- 1. Sell Zone ESP
         if HubState.SellESP and IS_GAMEPLAY then
             local dist = math.floor((myPos - Landmarks.SellCow).Magnitude)
             updateBillboard("SellZone", sellAnchorPart, "SELL COW [" .. dist .. "m]", Color3.fromRGB(50, 220, 255))
@@ -714,7 +760,6 @@ task.spawn(function()
             removeBillboard("SellZone")
         end
 
-        -- 2. Needle ESP
         if HubState.NeedleESP and IS_GAMEPLAY then
             local needle = workspace:FindFirstChild("The Needle") or workspace:FindFirstChild("HiddenNeedleClient")
             local needlePart = nil
@@ -733,7 +778,6 @@ task.spawn(function()
             removeBillboard("Needle")
         end
 
-        -- 3. Gem ESP
         if HubState.GemESP and IS_GAMEPLAY then
             local gemIndex = 1
             for _, obj in ipairs(workspace:GetDescendants()) do
@@ -750,7 +794,6 @@ task.spawn(function()
             end
         end
 
-        -- 4. Player ESP
         if HubState.PlayerESP then
             for _, p in ipairs(Players:GetPlayers()) do
                 if p ~= LocalPlayer and p.Character then
@@ -768,6 +811,7 @@ task.spawn(function()
         end
     end
 end)
+table.insert(HubThreads, espThread)
 
 -- 8.8 LOBBY AUTOMATION
 local KNOWN_CODES = {
@@ -794,7 +838,7 @@ end
 
 local function autoRollClassLoop()
     task.spawn(function()
-        while HubState.AutoRollClass do
+        while HubState.AutoRollClass and IsHubLoaded do
             if not Remotes.RollClass then
                 addLog("warn", "RollClass is only available in the Lobby!")
                 break
@@ -817,7 +861,87 @@ local function autoRollClassLoop()
     end)
 end
 
+-- 8.9 UNLOAD FUNCTION
+local GlobalScreenGui = nil
+
+local function unloadHub()
+    IsHubLoaded = false
+    addLog("warn", "Unloading Needle Hub completely...")
+
+    for _, conn in ipairs(HubConnections) do
+        pcall(function() conn:Disconnect() end)
+    end
+    table.clear(HubConnections)
+
+    toggleFly(false)
+
+    local hum = getHumanoid()
+    if hum then hum.WalkSpeed = 16 end
+
+    pcall(function() ESPFolder:Destroy() end)
+
+    if GlobalScreenGui then
+        pcall(function() GlobalScreenGui:Destroy() end)
+        GlobalScreenGui = nil
+    end
+
+    addLog("info", "Needle Hub unloaded successfully.")
+end
+
 -- SECTION 9: USER INTERFACE (FLUENT UI + NATIVE FALLBACK)
+
+-- Floating Quick-Toggle Button
+local function createFloatingToggleButton(toggleCallback)
+    local floatGui = Instance.new("ScreenGui")
+    floatGui.Name = "NeedleFloatGui"
+    floatGui.ResetOnSpawn = false
+    floatGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    pcall(function() floatGui.Parent = CoreGui end)
+    if not floatGui.Parent then floatGui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
+
+    local floatBtn = Instance.new("TextButton")
+    floatBtn.Name = "FloatButton"
+    floatBtn.Size = UDim2.fromOffset(110, 32)
+    floatBtn.Position = UDim2.new(0, 16, 0.5, -60)
+    floatBtn.BackgroundColor3 = Color3.fromRGB(24, 24, 34)
+    floatBtn.Text = "Needle Hub"
+    floatBtn.TextColor3 = Color3.fromRGB(220, 220, 255)
+    floatBtn.Font = Enum.Font.GothamBold
+    floatBtn.TextSize = 12
+    floatBtn.Parent = floatGui
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 8)
+    corner.Parent = floatBtn
+
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = Color3.fromRGB(80, 120, 255)
+    stroke.Thickness = 1.2
+    stroke.Parent = floatBtn
+
+    -- Make float button draggable
+    local dragging, dragStart, startPos
+    floatBtn.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            dragStart = input.Position
+            startPos = floatBtn.Position
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then dragging = false end
+            end)
+        end
+    end)
+    floatBtn.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            local delta = input.Position - dragStart
+            floatBtn.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+        end
+    end)
+
+    floatBtn.MouseButton1Click:Connect(toggleCallback)
+    table.insert(HubConnections, {Disconnect = function() pcall(function() floatGui:Destroy() end) end})
+end
+
 local function buildNativeUI()
     addLog("info", "Loading Fallback Native ScreenGui...")
 
@@ -827,6 +951,7 @@ local function buildNativeUI()
     screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
     pcall(function() screenGui.Parent = CoreGui end)
     if not screenGui.Parent then screenGui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
+    GlobalScreenGui = screenGui
 
     local mainFrame = Instance.new("Frame")
     mainFrame.Name = "MainFrame"
@@ -835,6 +960,7 @@ local function buildNativeUI()
     mainFrame.AnchorPoint = Vector2.new(0.5, 0.5)
     mainFrame.BackgroundColor3 = Color3.fromRGB(18, 18, 24)
     mainFrame.BorderSizePixel = 0
+    mainFrame.ClipsDescendants = true
     mainFrame.Parent = screenGui
 
     local corner = Instance.new("UICorner")
@@ -846,7 +972,7 @@ local function buildNativeUI()
     stroke.Thickness = 1.5
     stroke.Parent = mainFrame
 
-    -- Title Bar
+    -- Title Bar with Draggable Script
     local titleBar = Instance.new("Frame")
     titleBar.Name = "TitleBar"
     titleBar.Size = UDim2.new(1, 0, 0, 36)
@@ -858,17 +984,52 @@ local function buildNativeUI()
     titleCorner.CornerRadius = UDim.new(0, 10)
     titleCorner.Parent = titleBar
 
+    -- Dragging Logic for mainFrame via TitleBar
+    local dragging, dragStart, startPos
+    titleBar.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            dragStart = input.Position
+            startPos = mainFrame.Position
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then dragging = false end
+            end)
+        end
+    end)
+    titleBar.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            local delta = input.Position - dragStart
+            mainFrame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+        end
+    end)
+
     local titleLabel = Instance.new("TextLabel")
-    titleLabel.Size = UDim2.new(1, -50, 1, 0)
+    titleLabel.Size = UDim2.new(1, -90, 1, 0)
     titleLabel.Position = UDim2.fromOffset(14, 0)
     titleLabel.BackgroundTransparency = 1
-    titleLabel.Text = "Search For The Needle - Hub v2.0 [" .. GAME_MODE_NAME .. "]"
+    titleLabel.Text = "Search For The Needle - Hub v3.0 [" .. GAME_MODE_NAME .. "]"
     titleLabel.TextColor3 = Color3.fromRGB(230, 230, 240)
     titleLabel.Font = Enum.Font.GothamBold
     titleLabel.TextSize = 13
     titleLabel.TextXAlignment = Enum.TextXAlignment.Left
     titleLabel.Parent = titleBar
 
+    -- Minimize Button (-)
+    local isMinimized = false
+    local minBtn = Instance.new("TextButton")
+    minBtn.Size = UDim2.fromOffset(26, 26)
+    minBtn.Position = UDim2.new(1, -62, 0.5, -13)
+    minBtn.BackgroundColor3 = Color3.fromRGB(50, 50, 65)
+    minBtn.Text = "-"
+    minBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    minBtn.Font = Enum.Font.GothamBold
+    minBtn.TextSize = 14
+    minBtn.Parent = titleBar
+    local minCorner = Instance.new("UICorner")
+    minCorner.CornerRadius = UDim.new(0, 6)
+    minCorner.Parent = minBtn
+
+    -- Close Button (X)
     local closeBtn = Instance.new("TextButton")
     closeBtn.Size = UDim2.fromOffset(26, 26)
     closeBtn.Position = UDim2.new(1, -30, 0.5, -13)
@@ -881,7 +1042,6 @@ local function buildNativeUI()
     local closeCorner = Instance.new("UICorner")
     closeCorner.CornerRadius = UDim.new(0, 6)
     closeCorner.Parent = closeBtn
-    closeBtn.MouseButton1Click:Connect(function() screenGui.Enabled = not screenGui.Enabled end)
 
     -- Sidebar
     local sidebar = Instance.new("Frame")
@@ -911,6 +1071,29 @@ local function buildNativeUI()
     contentArea.BackgroundTransparency = 1
     contentArea.Parent = mainFrame
 
+    minBtn.MouseButton1Click:Connect(function()
+        isMinimized = not isMinimized
+        minBtn.Text = isMinimized and "+" or "-"
+        if isMinimized then
+            mainFrame.Size = UDim2.fromOffset(560, 36)
+            sidebar.Visible = false
+            contentArea.Visible = false
+        else
+            mainFrame.Size = UDim2.fromOffset(560, 420)
+            sidebar.Visible = true
+            contentArea.Visible = true
+        end
+    end)
+
+    closeBtn.MouseButton1Click:Connect(function()
+        screenGui.Enabled = not screenGui.Enabled
+    end)
+
+    -- Attach Floating Toggle Button
+    createFloatingToggleButton(function()
+        screenGui.Enabled = not screenGui.Enabled
+    end)
+
     local tabContainers = {}
 
     local function createTabContent(name)
@@ -919,7 +1102,7 @@ local function buildNativeUI()
         sf.Size = UDim2.fromScale(1, 1)
         sf.BackgroundTransparency = 1
         sf.BorderSizePixel = 0
-        sf.CanvasSize = UDim2.fromOffset(0, 650)
+        sf.CanvasSize = UDim2.fromOffset(0, 680)
         sf.ScrollBarThickness = 4
         sf.Visible = false
         sf.Parent = contentArea
@@ -939,7 +1122,7 @@ local function buildNativeUI()
         return sf
     end
 
-    local tabs = {"AutoFarm", "Player", "Teleport", "LobbyAuto", "ESP", "Console"}
+    local tabs = {"AutoFarm", "Player", "Teleport", "LobbyAuto", "ESP", "Console", "Settings"}
     for _, tName in ipairs(tabs) do createTabContent(tName) end
 
     local function switchTab(tabName)
@@ -950,12 +1133,12 @@ local function buildNativeUI()
 
     for idx, tName in ipairs(tabs) do
         local btn = Instance.new("TextButton")
-        btn.Size = UDim2.new(1, 0, 0, 30)
+        btn.Size = UDim2.new(1, 0, 0, 28)
         btn.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
         btn.Text = tName
         btn.TextColor3 = Color3.fromRGB(200, 200, 220)
         btn.Font = Enum.Font.GothamMedium
-        btn.TextSize = 12
+        btn.TextSize = 11
         btn.LayoutOrder = idx
         btn.Parent = sidebar
         local bCorner = Instance.new("UICorner")
@@ -966,7 +1149,7 @@ local function buildNativeUI()
 
     local function addNativeToggle(parent, title, default, callback)
         local frame = Instance.new("Frame")
-        frame.Size = UDim2.new(1, 0, 0, 36)
+        frame.Size = UDim2.new(1, 0, 0, 34)
         frame.BackgroundColor3 = Color3.fromRGB(28, 28, 36)
         frame.BorderSizePixel = 0
         frame.Parent = parent
@@ -982,7 +1165,7 @@ local function buildNativeUI()
         label.Text = title
         label.TextColor3 = Color3.fromRGB(220, 220, 230)
         label.Font = Enum.Font.Gotham
-        label.TextSize = 12
+        label.TextSize = 11
         label.TextXAlignment = Enum.TextXAlignment.Left
         label.Parent = frame
 
@@ -1010,12 +1193,12 @@ local function buildNativeUI()
 
     local function addNativeButton(parent, title, callback)
         local btn = Instance.new("TextButton")
-        btn.Size = UDim2.new(1, 0, 0, 32)
+        btn.Size = UDim2.new(1, 0, 0, 30)
         btn.BackgroundColor3 = Color3.fromRGB(40, 40, 55)
         btn.Text = title
         btn.TextColor3 = Color3.fromRGB(240, 240, 255)
         btn.Font = Enum.Font.GothamBold
-        btn.TextSize = 12
+        btn.TextSize = 11
         btn.Parent = parent
         local bCorner = Instance.new("UICorner")
         bCorner.CornerRadius = UDim.new(0, 6)
@@ -1026,32 +1209,29 @@ local function buildNativeUI()
     -- POPULATE TABS
     -- Tab 1: AutoFarm
     local farmTab = tabContainers.AutoFarm
-    addNativeToggle(farmTab, "Auto Collect Hay", HubState.AutoFarmHay, function(val)
+    addNativeToggle(farmTab, "Auto Collect Hay (Fast Multi-Dig)", HubState.AutoFarmHay, function(val)
         HubState.AutoFarmHay = val
         addLog("info", "Auto Farm Hay: " .. tostring(val))
     end)
-    addNativeToggle(farmTab, "Teleport to Hay (Off = In-Place)", false, function(val)
+    addNativeToggle(farmTab, "Teleport Mode (Off = In-Place Farm)", false, function(val)
         HubState.FarmMode = val and "Teleport" or "In-Place"
-        addLog("info", "Farm mode: " .. HubState.FarmMode)
     end)
     addNativeToggle(farmTab, "Auto Sell (Full Bag)", HubState.AutoSell, function(val)
         HubState.AutoSell = val
     end)
     addNativeToggle(farmTab, "Remote Sell (Off = Teleport to Cow)", true, function(val)
         HubState.SellMethod = val and "Remote" or "Teleport"
-        addLog("info", "Sell method: " .. HubState.SellMethod)
     end)
-    addNativeToggle(farmTab, "Auto Collect Gems", HubState.AutoCollectGems, function(val)
-        HubState.AutoCollectGems = val
-    end)
-    addNativeToggle(farmTab, "Auto Deploy Drone", HubState.AutoDeployDrone, function(val)
-        HubState.AutoDeployDrone = val
-    end)
-    addNativeToggle(farmTab, "Auto Win / Deliver Needle", HubState.AutoWinNeedle, function(val)
+    addNativeToggle(farmTab, "Auto Win Needle (Auto TP & Hand-In)", HubState.AutoWinNeedle, function(val)
         HubState.AutoWinNeedle = val
         addLog("info", "Auto Win Needle: " .. tostring(val))
     end)
-    addNativeButton(farmTab, "Instant Sell Now (Fire Remote)", function()
+    addNativeButton(farmTab, "Dig Multiplier Preset (12 Strands)", function()
+        HubState.DigBurst = 12
+        HubState.FarmDelay = 0.06
+        addLog("info", "Dig Multiplier set to 12 (Ultra-Fast)")
+    end)
+    addNativeButton(farmTab, "Instant Sell Hay Now", function()
         if Remotes.SellHay then
             Remotes.SellHay:FireServer()
             addLog("info", "Fired SellHay remote")
@@ -1060,14 +1240,17 @@ local function buildNativeUI()
 
     -- Tab 2: Player
     local playerTab = tabContainers.Player
-    addNativeToggle(playerTab, "Free Mouse Cursor [LeftAlt]", HubState.FreeMouse, function(val)
+    addNativeButton(playerTab, "Snap to 3rd Person View (16 Studs)", function()
+        forceSnap3rdPerson(16)
+    end)
+    addNativeToggle(playerTab, "Free Mouse [LeftAlt / Insert]", HubState.FreeMouse, function(val)
         HubState.FreeMouse = val
     end)
     addNativeToggle(playerTab, "Unlock 3rd Person Zoom", HubState.UnlockCamera, function(val)
         HubState.UnlockCamera = val
         if not val then LocalPlayer.CameraMode = Enum.CameraMode.LockFirstPerson end
     end)
-    addNativeToggle(playerTab, "Enable Speed Modifier (50)", HubState.WalkSpeedEnabled, function(val)
+    addNativeToggle(playerTab, "Speed Modifier (50)", HubState.WalkSpeedEnabled, function(val)
         HubState.WalkSpeed = 50
         HubState.WalkSpeedEnabled = val
     end)
@@ -1082,31 +1265,20 @@ local function buildNativeUI()
         HubState.InfiniteJump = val
     end)
 
-    -- Tab 3: Teleport
+    -- Tab 3: Teleports
     local tpTab = tabContainers.Teleport
-    addNativeButton(tpTab, "Teleport to Hay Field", function()
-        teleportTo(Landmarks.HayCenter)
-    end)
-    addNativeButton(tpTab, "Teleport to Sell Cow", function()
-        teleportTo(Landmarks.SellCow)
-    end)
-    addNativeButton(tpTab, "Teleport to Farmer NPC", function()
-        teleportTo(Landmarks.FarmerNPC)
-    end)
-    addNativeButton(tpTab, "Teleport to Needle", function()
-        if Landmarks.NeedleCFrame then
-            teleportTo(Landmarks.NeedleCFrame)
-        else
-            addLog("warn", "Needle location not yet identified")
-        end
+    addNativeButton(tpTab, "Teleport to Hayfield", function() teleportTo(Landmarks.HayCenter) end)
+    addNativeButton(tpTab, "Teleport to Sell Cow", function() teleportTo(Landmarks.SellCow) end)
+    addNativeButton(tpTab, "Teleport to Farmer NPC", function() teleportTo(Landmarks.FarmerNPC) end)
+    addNativeButton(tpTab, "Teleport to The Needle", function()
+        if Landmarks.NeedleCFrame then teleportTo(Landmarks.NeedleCFrame)
+        else addLog("warn", "Needle not yet found") end
     end)
 
     -- Tab 4: Lobby Automation
     local autoTab = tabContainers.LobbyAuto
-    addNativeButton(autoTab, "Redeem All Promo Codes (Lobby)", function()
-        redeemAllCodes()
-    end)
-    addNativeButton(autoTab, "Equip Cow Pet (Highest Capacity)", function()
+    addNativeButton(autoTab, "Redeem All Codes (Lobby Only)", function() redeemAllCodes() end)
+    addNativeButton(autoTab, "Equip Cow Pet (120 Cap)", function()
         if Remotes.EquipPet then Remotes.EquipPet:InvokeServer("Cow") end
     end)
     addNativeButton(autoTab, "Open Alien Chest", function()
@@ -1119,9 +1291,9 @@ local function buildNativeUI()
 
     -- Tab 5: ESP
     local espTab = tabContainers.ESP
-    addNativeToggle(espTab, "Needle ESP", HubState.NeedleESP, function(val) HubState.NeedleESP = val end)
-    addNativeToggle(espTab, "Sell Cow ESP", HubState.SellESP, function(val) HubState.SellESP = val end)
-    addNativeToggle(espTab, "Gem ESP", HubState.GemESP, function(val) HubState.GemESP = val end)
+    addNativeToggle(espTab, "Needle ESP (Yellow)", HubState.NeedleESP, function(val) HubState.NeedleESP = val end)
+    addNativeToggle(espTab, "Sell Cow ESP (Cyan)", HubState.SellESP, function(val) HubState.SellESP = val end)
+    addNativeToggle(espTab, "Gem ESP (Green)", HubState.GemESP, function(val) HubState.GemESP = val end)
     addNativeToggle(espTab, "Player ESP", HubState.PlayerESP, function(val) HubState.PlayerESP = val end)
 
     -- Tab 6: Console
@@ -1141,7 +1313,7 @@ local function buildNativeUI()
     lbCorner.Parent = logBox
 
     task.spawn(function()
-        while true do
+        while IsHubLoaded do
             task.wait(1)
             local recent = {}
             local count = #LogEntries
@@ -1151,13 +1323,19 @@ local function buildNativeUI()
         end
     end)
 
-    addNativeButton(conTab, "Clear Logs", function()
+    addNativeButton(conTab, "Clear Event Log", function()
         table.clear(LogEntries)
         logBox.Text = ""
     end)
 
+    -- Tab 7: Settings & Unload
+    local setTab = tabContainers.Settings
+    addNativeButton(setTab, "UNLOAD / DESTROY HUB", function()
+        unloadHub()
+    end)
+
     switchTab("AutoFarm")
-    addLog("info", "Native GUI ready")
+    addLog("info", "Native GUI loaded successfully")
 end
 
 -- Try loading Fluent UI first
@@ -1168,14 +1346,14 @@ local function initializeFluentUI()
     end)
 
     if not loadSuccess or not Fluent then
-        addLog("warn", "Fluent UI failed to load. Loading Native GUI.")
+        addLog("warn", "Fluent UI failed to load. Initiating Native GUI.")
         buildNativeUI()
         return
     end
 
     local Window = Fluent:CreateWindow({
         Title = "Search For The Needle",
-        SubTitle = "Hub v2.0 [" .. GAME_MODE_NAME .. "]",
+        SubTitle = "Hub v3.0 [" .. GAME_MODE_NAME .. "]",
         TabWidth = 160,
         Size = UDim2.fromOffset(580, 460),
         Acrylic = false,
@@ -1183,22 +1361,40 @@ local function initializeFluentUI()
         MinimizeKey = Enum.KeyCode.RightControl
     })
 
+    -- Add floating toggle button on screen
+    createFloatingToggleButton(function()
+        pcall(function()
+            if Window.Root then Window.Root.Visible = not Window.Root.Visible end
+        end)
+    end)
+
     -- TAB 1: Auto Farm
     local TabFarm = Window:AddTab({Title = "Auto Farm", Icon = "bot"})
 
-    TabFarm:AddToggle("AutoFarmHay", {Title = "Auto Collect Hay", Default = HubState.AutoFarmHay}):OnChanged(function(val)
+    TabFarm:AddToggle("AutoFarmHay", {Title = "Auto Collect Hay (Multi-Dig)", Default = HubState.AutoFarmHay}):OnChanged(function(val)
         HubState.AutoFarmHay = val
         addLog("info", "Auto Farm Hay: " .. tostring(val))
     end)
 
+    TabFarm:AddSlider("DigBurstSlider", {
+        Title = "Dig Multiplier / Strands per Tick",
+        Default = 8,
+        Min = 1,
+        Max = 20,
+        Rounding = 0,
+        Callback = function(val)
+            HubState.DigBurst = val
+            addLog("info", "Dig Multiplier: " .. val)
+        end
+    })
+
     TabFarm:AddDropdown("FarmModeDrop", {
-        Title = "Harvest Positioning",
-        Values = {"In-Place (Stay Put)", "Teleport (Hayfield Center)"},
+        Title = "Harvest Mode",
+        Values = {"In-Place (Stay Put)", "Teleport (To Hayfield)"},
         Multi = false,
         Default = 1,
     }):OnChanged(function(val)
         HubState.FarmMode = string.find(val, "In-Place") and "In-Place" or "Teleport"
-        addLog("info", "Farm Mode set to: " .. HubState.FarmMode)
     end)
 
     TabFarm:AddToggle("AutoSell", {Title = "Auto Sell (Full Bag)", Default = HubState.AutoSell}):OnChanged(function(val)
@@ -1212,20 +1408,19 @@ local function initializeFluentUI()
         Default = 1,
     }):OnChanged(function(val)
         HubState.SellMethod = string.find(val, "Remote") and "Remote" or "Teleport"
-        addLog("info", "Sell Method: " .. HubState.SellMethod)
     end)
 
-    TabFarm:AddToggle("AutoGems", {Title = "Auto Collect Nearby Gems", Default = HubState.AutoCollectGems}):OnChanged(function(val)
+    TabFarm:AddToggle("AutoWinNeedle", {Title = "Auto Win Needle (Auto TP & Hand-In)", Default = true}):OnChanged(function(val)
+        HubState.AutoWinNeedle = val
+        addLog("info", "Auto Win Needle: " .. tostring(val))
+    end)
+
+    TabFarm:AddToggle("AutoGems", {Title = "Auto Collect Nearby Gems", Default = true}):OnChanged(function(val)
         HubState.AutoCollectGems = val
     end)
 
-    TabFarm:AddToggle("AutoDrone", {Title = "Auto Deploy Drone", Default = HubState.AutoDeployDrone}):OnChanged(function(val)
+    TabFarm:AddToggle("AutoDrone", {Title = "Auto Deploy Drone", Default = true}):OnChanged(function(val)
         HubState.AutoDeployDrone = val
-    end)
-
-    TabFarm:AddToggle("AutoWinNeedle", {Title = "Auto Win Needle (TP & Hand-In)", Default = HubState.AutoWinNeedle}):OnChanged(function(val)
-        HubState.AutoWinNeedle = val
-        addLog("info", "Auto Win Needle: " .. tostring(val))
     end)
 
     TabFarm:AddButton({
@@ -1239,17 +1434,14 @@ local function initializeFluentUI()
         end
     })
 
-    TabFarm:AddButton({
-        Title = "Skip Cutscene & Tutorial",
-        Callback = function()
-            if Remotes.IntroCutsceneFinished then Remotes.IntroCutsceneFinished:FireServer() end
-            if Remotes.TutorialCompleted then Remotes.TutorialCompleted:FireServer() end
-            addLog("info", "Skipped cutscene and tutorial")
-        end
-    })
-
     -- TAB 2: Player Mods
     local TabPlayer = Window:AddTab({Title = "Player", Icon = "user"})
+
+    TabPlayer:AddButton({
+        Title = "Snap to 3rd Person View (16 Studs)",
+        Description = "Instantly zooms camera out and allows rotation",
+        Callback = function() forceSnap3rdPerson(16) end
+    })
 
     TabPlayer:AddToggle("FreeMouseToggle", {Title = "Free Mouse Cursor [LeftAlt / Insert]", Default = true}):OnChanged(function(val)
         HubState.FreeMouse = val
@@ -1298,29 +1490,14 @@ local function initializeFluentUI()
     -- TAB 3: Teleports
     local TabTP = Window:AddTab({Title = "Teleports", Icon = "map-pin"})
 
-    TabTP:AddButton({
-        Title = "Teleport to Hayfield",
-        Callback = function() teleportTo(Landmarks.HayCenter) end
-    })
-
-    TabTP:AddButton({
-        Title = "Teleport to Sell Cow",
-        Callback = function() teleportTo(Landmarks.SellCow) end
-    })
-
-    TabTP:AddButton({
-        Title = "Teleport to Farmer NPC",
-        Callback = function() teleportTo(Landmarks.FarmerNPC) end
-    })
-
+    TabTP:AddButton({Title = "Teleport to Hayfield", Callback = function() teleportTo(Landmarks.HayCenter) end})
+    TabTP:AddButton({Title = "Teleport to Sell Cow", Callback = function() teleportTo(Landmarks.SellCow) end})
+    TabTP:AddButton({Title = "Teleport to Farmer NPC", Callback = function() teleportTo(Landmarks.FarmerNPC) end})
     TabTP:AddButton({
         Title = "Teleport to The Needle",
         Callback = function()
-            if Landmarks.NeedleCFrame then
-                teleportTo(Landmarks.NeedleCFrame)
-            else
-                addLog("warn", "Needle position not yet detected")
-            end
+            if Landmarks.NeedleCFrame then teleportTo(Landmarks.NeedleCFrame)
+            else addLog("warn", "Needle location not yet identified") end
         end
     })
 
@@ -1329,29 +1506,18 @@ local function initializeFluentUI()
 
     TabAuto:AddParagraph({
         Title = "Lobby Systems Info",
-        Content = IS_LOBBY and "You are in the Lobby. All functions below are available." or "Notice: You are currently in a Match. Codes, Chests and Class Roll require the Lobby."
+        Content = IS_LOBBY and "You are in the Lobby. All features active." or "Notice: You are in a Match. Codes and Class Roll require the Lobby."
     })
 
-    TabAuto:AddButton({
-        Title = "Redeem All Promo Codes",
-        Description = "Redeems all known game codes (Lobby Only)",
-        Callback = function() redeemAllCodes() end
-    })
-
+    TabAuto:AddButton({Title = "Redeem All Promo Codes (Lobby)", Callback = function() redeemAllCodes() end})
     TabAuto:AddButton({
         Title = "Equip Cow Pet (Highest Capacity: 120)",
-        Callback = function()
-            if Remotes.EquipPet then Remotes.EquipPet:InvokeServer("Cow") end
-        end
+        Callback = function() if Remotes.EquipPet then Remotes.EquipPet:InvokeServer("Cow") end end
     })
-
     TabAuto:AddButton({
         Title = "Open Alien Chest",
-        Callback = function()
-            if Remotes.OpenChest then Remotes.OpenChest:InvokeServer() end
-        end
+        Callback = function() if Remotes.OpenChest then Remotes.OpenChest:InvokeServer() end end
     })
-
     TabAuto:AddDropdown("TargetClassDrop", {
         Title = "Target Class",
         Values = {
@@ -1362,7 +1528,7 @@ local function initializeFluentUI()
         Default = 8,
     }):OnChanged(function(val) HubState.TargetClass = val end)
 
-    TabAuto:AddToggle("RollToggle", {Title = "Auto Roll for Class (Costs 40 Gems)", Default = false}):OnChanged(function(val)
+    TabAuto:AddToggle("RollToggle", {Title = "Auto Roll for Class", Default = false}):OnChanged(function(val)
         HubState.AutoRollClass = val
         if val then autoRollClassLoop() end
     end)
@@ -1370,21 +1536,10 @@ local function initializeFluentUI()
     -- TAB 5: ESP
     local TabESP = Window:AddTab({Title = "ESP & Visuals", Icon = "eye"})
 
-    TabESP:AddToggle("NeedleESP", {Title = "Needle ESP (Yellow)", Default = true}):OnChanged(function(val)
-        HubState.NeedleESP = val
-    end)
-
-    TabESP:AddToggle("SellESP", {Title = "Sell Cow ESP (Cyan)", Default = true}):OnChanged(function(val)
-        HubState.SellESP = val
-    end)
-
-    TabESP:AddToggle("GemESP", {Title = "Gem ESP (Green)", Default = true}):OnChanged(function(val)
-        HubState.GemESP = val
-    end)
-
-    TabESP:AddToggle("PlayerESP", {Title = "Player ESP", Default = false}):OnChanged(function(val)
-        HubState.PlayerESP = val
-    end)
+    TabESP:AddToggle("NeedleESP", {Title = "Needle ESP (Yellow)", Default = true}):OnChanged(function(val) HubState.NeedleESP = val end)
+    TabESP:AddToggle("SellESP", {Title = "Sell Cow ESP (Cyan)", Default = true}):OnChanged(function(val) HubState.SellESP = val end)
+    TabESP:AddToggle("GemESP", {Title = "Gem ESP (Green)", Default = true}):OnChanged(function(val) HubState.GemESP = val end)
+    TabESP:AddToggle("PlayerESP", {Title = "Player ESP", Default = false}):OnChanged(function(val) HubState.PlayerESP = val end)
 
     -- TAB 6: Console
     local TabCon = Window:AddTab({Title = "Console", Icon = "terminal"})
@@ -1395,7 +1550,7 @@ local function initializeFluentUI()
     })
 
     task.spawn(function()
-        while true do
+        while IsHubLoaded do
             task.wait(1.5)
             local recent = {}
             local count = #LogEntries
@@ -1413,6 +1568,18 @@ local function initializeFluentUI()
         end
     })
 
+    -- TAB 7: Settings & Unload
+    local TabSettings = Window:AddTab({Title = "Settings", Icon = "settings"})
+
+    TabSettings:AddButton({
+        Title = "UNLOAD / DESTROY HUB",
+        Description = "Stops all loops, removes UI, and cleans up completely",
+        Callback = function()
+            pcall(function() Window:Destroy() end)
+            unloadHub()
+        end
+    })
+
     Window:SelectTab(1)
     addLog("info", "Fluent UI ready")
 end
@@ -1421,10 +1588,9 @@ end
 task.spawn(function()
     pcall(function()
         LocalPlayer.CameraMode = Enum.CameraMode.Classic
-        LocalPlayer.CameraMaxZoomDistance = 250
+        LocalPlayer.CameraMaxZoomDistance = 300
         LocalPlayer.CameraMinZoomDistance = 0.5
-        UserInputService.MouseBehavior = Enum.MouseBehavior.Default
-        UserInputService.MouseIconEnabled = true
+        forceSnap3rdPerson(16)
     end)
     initializeFluentUI()
 end)
