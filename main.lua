@@ -83,6 +83,7 @@ elseif CURRENT_PLACE_ID == BASEMENT_PLACE_ID then
 else
     GAME_MODE_NAME = "Place " .. tostring(CURRENT_PLACE_ID)
 end
+local CURRENT_PLACE_NAME = GAME_MODE_NAME
 
 -- Require game Config if available for exact mathematical rainbow calculations
 local HaystackConfig = nil
@@ -215,6 +216,14 @@ local function bindRemotes()
                 Remotes[remoteName] = obj
             end
         end
+        -- Dynamic catch-all: index any additional or dynamically named remotes
+        for _, child in ipairs(needleHaystack:GetChildren()) do
+            if child:IsA("RemoteEvent") or child:IsA("RemoteFunction") then
+                if not Remotes[child.Name] then
+                    Remotes[child.Name] = child
+                end
+            end
+        end
     end
 
     local codeSys = ReplicatedStorage:FindFirstChild("CodeSystem")
@@ -333,6 +342,8 @@ local HubState = {
     AutoDeployDrone = true,
     AutoBuyUpgrades = false,
     AutoEquipBestTool = true,
+    AutoUseTnt = true,
+    TntInterval = 11,
     ForcedToolSlot = 0,
     FarmCooldown = 0.35,
 
@@ -392,6 +403,17 @@ local function getHotbarSlots()
             end
         end
     end
+    local nh = ReplicatedStorage:FindFirstChild("NeedleHaystack")
+    if nh then
+        local mod = nh:FindFirstChild("HotbarSlots")
+        if mod and mod:IsA("ModuleScript") then
+            local ok, res = pcall(require, mod)
+            if ok and type(res) == "table" then
+                CachedHotbarSlots = res
+                return res
+            end
+        end
+    end
     return nil
 end
 
@@ -412,15 +434,26 @@ end
 
 local function isToolOwned(toolName)
     if toolName == "Needle" then
-        return LocalPlayer:GetAttribute("NeedleOwned") == true
+        return LocalPlayer:GetAttribute("NeedleOwned") == true or LocalPlayer:GetAttribute("HasNeedle") == true
     elseif toolName == "Vacuum" then
-        return (LocalPlayer:GetAttribute("VacuumOwned") == true or LocalPlayer:GetAttribute("PermanentVacuumOwned") == true)
+        return (LocalPlayer:GetAttribute("VacuumOwned") == true
+            or LocalPlayer:GetAttribute("PermanentVacuumOwned") == true
+            or (LocalPlayer:GetAttribute("VacuumHeatTime") and LocalPlayer:GetAttribute("VacuumHeatTime") > 0)
+            or (LocalPlayer:GetAttribute("VacuumGrabCount") and LocalPlayer:GetAttribute("VacuumGrabCount") > 0))
     elseif toolName == "Pitchfork" then
-        return (LocalPlayer:GetAttribute("PitchforkOwned") == true or LocalPlayer:GetAttribute("PermanentPitchforkOwned") == true)
+        return (LocalPlayer:GetAttribute("PitchforkOwned") == true
+            or LocalPlayer:GetAttribute("PermanentPitchforkOwned") == true
+            or (LocalPlayer:GetAttribute("PitchforkReach") and LocalPlayer:GetAttribute("PitchforkReach") > 0)
+            or (LocalPlayer:GetAttribute("PitchforkScoop") and LocalPlayer:GetAttribute("PitchforkScoop") > 0))
     elseif toolName == "Tnt" then
-        return (LocalPlayer:GetAttribute("TntOwned") == true or LocalPlayer:GetAttribute("PermanentTntOwned") == true)
+        return (LocalPlayer:GetAttribute("TntOwned") == true
+            or LocalPlayer:GetAttribute("PermanentTntOwned") == true
+            or (LocalPlayer:GetAttribute("TntBlastRadius") and LocalPlayer:GetAttribute("TntBlastRadius") > 0)
+            or (LocalPlayer:GetAttribute("TntCooldown") and LocalPlayer:GetAttribute("TntCooldown") > 0))
     elseif toolName == "Drone" then
-        return (LocalPlayer:GetAttribute("DroneOwned") == true or LocalPlayer:GetAttribute("PermanentDroneOwned") == true)
+        return (LocalPlayer:GetAttribute("DroneOwned") == true
+            or LocalPlayer:GetAttribute("PermanentDroneOwned") == true
+            or (LocalPlayer:GetAttribute("DroneCapacity") and LocalPlayer:GetAttribute("DroneCapacity") > 0))
     elseif toolName == "Hand" then
         return true
     end
@@ -430,8 +463,8 @@ end
 local function isVacuumReady()
     if not isToolOwned("Vacuum") then return false end
     local overheated = LocalPlayer:GetAttribute("VacuumOverheated") == true
-    local state = LocalPlayer:GetAttribute("VacuumState")
-    if overheated or state == "Overheated" then
+    local state = tostring(LocalPlayer:GetAttribute("VacuumState") or "")
+    if overheated or state:lower():find("overheat") then
         return false
     end
     return true
@@ -466,20 +499,114 @@ end
 local lastEquippedSlotLogged = -1
 local function equipToolSlot(slotIndex, silent)
     if not slotIndex or type(slotIndex) ~= "number" then return end
+
+    -- 1. Game State Attributes
     pcall(function()
         LocalPlayer:SetAttribute("NeedleEquippedSlot", slotIndex)
     end)
+
+    -- 2. Client Hotbar Module
     local hotbar = getHotbarSlots()
     if hotbar and type(hotbar.setEquipped) == "function" then
         pcall(function()
             hotbar.setEquipped(slotIndex, false)
         end)
     end
+
+    -- 3. Virtual Input Keypress Simulation (Keys 1 to 6)
+    pcall(function()
+        local vim = safeService("VirtualInputManager")
+        local keyMap = {
+            [1] = Enum.KeyCode.One,
+            [2] = Enum.KeyCode.Two,
+            [3] = Enum.KeyCode.Three,
+            [4] = Enum.KeyCode.Four,
+            [5] = Enum.KeyCode.Five,
+            [6] = Enum.KeyCode.Six,
+        }
+        if vim and keyMap[slotIndex] then
+            vim:SendKeyEvent(true, keyMap[slotIndex], false, game)
+            task.wait(0.015)
+            vim:SendKeyEvent(false, keyMap[slotIndex], false, game)
+        end
+    end)
+
+    -- 4. PlayerGui Hotbar Button Interaction
+    pcall(function()
+        local pg = LocalPlayer:FindFirstChild("PlayerGui")
+        if pg then
+            for _, gui in ipairs(pg:GetChildren()) do
+                if gui:IsA("ScreenGui") then
+                    for _, desc in ipairs(gui:GetDescendants()) do
+                        if (desc:IsA("ImageButton") or desc:IsA("TextButton")) and desc.Visible then
+                            if desc.Name == tostring(slotIndex) or desc.Name == ("Slot" .. tostring(slotIndex)) or desc:GetAttribute("Slot") == slotIndex then
+                                desc.Selectable = true
+                                if firesignal then
+                                    firesignal(desc.MouseButton1Click)
+                                elseif desc.Activate then
+                                    desc:Activate()
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end)
+
     if not silent and lastEquippedSlotLogged ~= slotIndex then
         lastEquippedSlotLogged = slotIndex
         local tName = ToolNames[slotIndex] or ("Slot " .. tostring(slotIndex))
         addLog("info", "Equipped Tool: " .. tName .. " (Slot " .. slotIndex .. ")")
     end
+end
+
+-- Dedicated Autonomous TNT Thrower
+local function throwTntAt(targetPos)
+    if not isToolOwned("Tnt") then
+        addLog("warn", "TNT is not owned. Purchase it from the Barn shop!")
+        return false
+    end
+    local hrp = getHRP()
+    if not hrp then return false end
+
+    local tntAction = Remotes.TntAction or (ReplicatedStorage:FindFirstChild("NeedleHaystack") and ReplicatedStorage.NeedleHaystack:FindFirstChild("TntAction"))
+    if not tntAction then
+        addLog("warn", "TntAction remote not found in game!")
+        return false
+    end
+
+    local prevSlot = getCurrentEquippedSlot()
+    equipToolSlot(SLOT_TNT, true)
+    task.wait(0.06)
+
+    pcall(function()
+        tntAction:FireServer("light")
+    end)
+    addLog("info", "TNT: Lit fuse match! Aiming at hay...")
+
+    task.wait(0.48) -- Exact light duration from Config.TNT_LIGHT_TIME
+
+    local hrpPos = hrp.Position
+    local target = targetPos or Landmarks.HayCenter or (hrpPos + hrp.CFrame.LookVector * 20)
+    local origin = hrpPos + Vector3.new(0, 2.5, 0)
+    local dir = (target - origin).Unit
+    local vel = dir * 44 + Vector3.new(0, 14, 0)
+    local throwCF = CFrame.new(origin, target)
+
+    pcall(function()
+        tntAction:FireServer("throw", throwCF, vel)
+    end)
+    addLog("info", "TNT: THROWN into hay mound! Massive explosive harvest pending!")
+
+    task.wait(0.2)
+    if HubState.AutoEquipBestTool then
+        local bestSlot = getBestAvailableToolSlot()
+        equipToolSlot(bestSlot, true)
+    else
+        equipToolSlot(prevSlot > 0 and prevSlot or SLOT_HAND, true)
+    end
+    return true
 end
 
 local function getToolStatusSummary()
@@ -765,6 +892,12 @@ local farmThread = task.spawn(function()
                                 if Remotes.VacuumAction then
                                     pcall(function() Remotes.VacuumAction:FireServer(targetPos, hrp.CFrame.LookVector) end)
                                 end
+                                if Remotes.VacuumHarvest then
+                                    pcall(function() Remotes.VacuumHarvest:FireServer(targetPos, candidates) end)
+                                end
+                                if Remotes.VacuumDig then
+                                    pcall(function() Remotes.VacuumDig:FireServer(rId) end)
+                                end
                             end
 
                             pcall(function()
@@ -821,6 +954,12 @@ local farmThread = task.spawn(function()
                                         if Remotes.VacuumAction then
                                             pcall(function() Remotes.VacuumAction:FireServer(primaryPart.Position, hrp.CFrame.LookVector) end)
                                         end
+                                        if Remotes.VacuumHarvest then
+                                            pcall(function() Remotes.VacuumHarvest:FireServer(primaryPart.Position, candidates) end)
+                                        end
+                                        if Remotes.VacuumDig then
+                                            pcall(function() Remotes.VacuumDig:FireServer(pId) end)
+                                        end
                                     end
 
                                     pcall(function()
@@ -847,6 +986,35 @@ local farmThread = task.spawn(function()
     end
 end)
 table.insert(HubThreads, farmThread)
+
+-- 8.1b AUTONOMOUS TNT RECURRING CLEAVER ENGINE
+local lastAutoTntThrow = 0
+local tntThread = task.spawn(function()
+    while IsHubLoaded do
+        task.wait(1)
+        if HubState.AutoUseTnt and IS_GAMEPLAY and not isCurrentlySelling then
+            local hrp = getHRP()
+            if hrp and isToolOwned("Tnt") then
+                local currentHay = getHayHeld()
+                local maxCap = getHayCapacity()
+                local now = os.clock()
+                local cd = LocalPlayer:GetAttribute("TntCooldown") or HubState.TntInterval or 11
+                if (now - lastAutoTntThrow) >= cd and (maxCap - currentHay) >= 10 then
+                    lastAutoTntThrow = now
+                    local target = nil
+                    local rgbStrands = getAllRainbowStrands()
+                    if #rgbStrands > 0 then
+                        target = rgbStrands[1].Position
+                    else
+                        target = Landmarks.HayCenter or (hrp.Position + hrp.CFrame.LookVector * 18)
+                    end
+                    throwTntAt(target)
+                end
+            end
+        end
+    end
+end)
+table.insert(HubThreads, tntThread)
 
 -- 8.2 AUTO COLLECT GEMS ENGINE
 local gemThread = task.spawn(function()
@@ -1628,7 +1796,7 @@ local function buildNativeUI()
     statusLbl.Size = UDim2.new(1, -22, 1, 0)
     statusLbl.Position = UDim2.fromOffset(18, 0)
     statusLbl.BackgroundTransparency = 1
-    statusLbl.Text = CURRENT_PLACE_NAME
+    statusLbl.Text = tostring(CURRENT_PLACE_NAME or GAME_MODE_NAME or "Match")
     statusLbl.TextColor3 = Color3.fromRGB(200, 210, 230)
     statusLbl.Font = Enum.Font.GothamMedium
     statusLbl.TextSize = 10
@@ -2206,6 +2374,13 @@ local function buildNativeUI()
         end
         addLog("info", "Auto-Equip Best Tool: " .. tostring(val))
     end)
+    addNativeToggle(farmTab, "Auto-Use TNT (Explosive Cleaver)", HubState.AutoUseTnt, function(val)
+        HubState.AutoUseTnt = val
+        addLog("info", "Auto-Use TNT: " .. tostring(val))
+    end)
+    addNativeSlider(farmTab, "Auto-TNT Interval (Seconds)", 8, 30, HubState.TntInterval, function(val)
+        HubState.TntInterval = val
+    end)
     addNativeToggle(farmTab, "Prioritize RGB / Rare Straws (10x Value)", HubState.PrioritizeRGB, function(val)
         HubState.PrioritizeRGB = val
         addLog("info", "Prioritize RGB: " .. tostring(val))
@@ -2249,13 +2424,26 @@ local function buildNativeUI()
         equipToolSlot(bestSlot)
         addLog("info", "Reset tool selection to Auto: Equipped Slot " .. bestSlot)
     end)
-    addNativeButton(farmTab, "Equip Pitchfork (Slot 3)", function()
-        HubState.ForcedToolSlot = SLOT_PITCHFORK
-        equipToolSlot(SLOT_PITCHFORK)
-    end)
+    addNativeButton(farmTab, "Throw TNT Now (Instant Blast)", function()
+        local hrp = getHRP()
+        if hrp then
+            local target = nil
+            local rgbStrands = getAllRainbowStrands()
+            if #rgbStrands > 0 then
+                target = rgbStrands[1].Position
+            else
+                target = Landmarks.HayCenter or (hrp.Position + hrp.CFrame.LookVector * 18)
+            end
+            throwTntAt(target)
+        end
+    end, true)
     addNativeButton(farmTab, "Equip Vacuum (Slot 5)", function()
         HubState.ForcedToolSlot = SLOT_VACUUM
         equipToolSlot(SLOT_VACUUM)
+    end)
+    addNativeButton(farmTab, "Equip Pitchfork (Slot 3)", function()
+        HubState.ForcedToolSlot = SLOT_PITCHFORK
+        equipToolSlot(SLOT_PITCHFORK)
     end)
     addNativeButton(farmTab, "Equip TNT (Slot 2)", function()
         HubState.ForcedToolSlot = SLOT_TNT
@@ -2434,6 +2622,10 @@ local function buildNativeUI()
 end
 
 -- Initialize UI & Apply Camera Snap
-buildNativeUI()
+local okUi, errUi = pcall(buildNativeUI)
+if not okUi then
+    warn("[Needle Hub Error]: Failed to construct UI: " .. tostring(errUi))
+    addLog("error", "UI Construct Error: " .. tostring(errUi))
+end
 forceSnap3rdPerson(22)
-addLog("info", "Needle Hub v5.0 loaded successfully! Press LeftAlt to toggle mouse, hold RMB to rotate camera.")
+addLog("info", "Needle Hub v5.1 loaded successfully! Press LeftAlt to toggle mouse, hold RMB to rotate camera.")
