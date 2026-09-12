@@ -341,6 +341,8 @@ local HubState = {
     AutoRollClass = false,
     TargetClass = "Ultimate Farmer",
     FarmDelay = 0.12,
+    FreeMouse = true,
+    UnlockCamera = true,
 }
 
 -- 8.1 AUTO-FARM STATE MACHINE
@@ -545,6 +547,23 @@ RunService.RenderStepped:Connect(function()
     local hum = char:FindFirstChildOfClass("Humanoid")
     local hrp = char:FindFirstChild("HumanoidRootPart")
 
+    -- Unlock 3rd Person Camera & Zoom Limits
+    if HubState.UnlockCamera then
+        if LocalPlayer.CameraMode ~= Enum.CameraMode.Classic then
+            LocalPlayer.CameraMode = Enum.CameraMode.Classic
+        end
+        if LocalPlayer.CameraMaxZoomDistance < 100 then
+            LocalPlayer.CameraMaxZoomDistance = 200
+            LocalPlayer.CameraMinZoomDistance = 0.5
+        end
+    end
+
+    -- Free Mouse Cursor Override (Allows clicking UI in 1st person games)
+    if HubState.FreeMouse then
+        UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+        UserInputService.MouseIconEnabled = true
+    end
+
     -- Speed modifier
     if hum and HubState.WalkSpeedEnabled then
         hum.WalkSpeed = HubState.WalkSpeed
@@ -585,6 +604,14 @@ RunService.RenderStepped:Connect(function()
             flyBodyVelocity.Velocity = Vector3.new(0, 0, 0)
         end
         flyBodyGyro.CFrame = cam.CFrame
+    end
+end)
+
+-- Key listener to quickly toggle Free Mouse (LeftAlt, RightControl, or Insert)
+UserInputService.InputBegan:Connect(function(input, gpe)
+    if input.KeyCode == Enum.KeyCode.LeftAlt or input.KeyCode == Enum.KeyCode.Insert then
+        HubState.FreeMouse = not HubState.FreeMouse
+        addLog("info", "Free Mouse Cursor toggled: " .. (HubState.FreeMouse and "UNLOCKED" or "LOCKED"))
     end
 end)
 
@@ -1017,6 +1044,15 @@ local function buildNativeUI()
 
     -- Tab 2: Player
     local playerTab = tabContainers.Player
+    addNativeToggle(playerTab, "Free Mouse Cursor [LeftAlt]", HubState.FreeMouse, function(val)
+        HubState.FreeMouse = val
+    end)
+    addNativeToggle(playerTab, "Unlock 3rd Person Zoom", HubState.UnlockCamera, function(val)
+        HubState.UnlockCamera = val
+        if not val then
+            LocalPlayer.CameraMode = Enum.CameraMode.LockFirstPerson
+        end
+    end)
     addNativeToggle(playerTab, "Enable Speed Modifier", HubState.WalkSpeedEnabled, function(val)
         HubState.WalkSpeedEnabled = val
     end)
@@ -1191,6 +1227,17 @@ local function initializeFluentUI()
 
     -- TAB 2: Player
     local TabPlayer = Window:AddTab({Title = "Player", Icon = "user"})
+
+    TabPlayer:AddToggle("FreeMouseToggle", {Title = "Free Mouse Cursor [LeftAlt]", Default = true}):OnChanged(function(val)
+        HubState.FreeMouse = val
+    end)
+
+    TabPlayer:AddToggle("UnlockCamToggle", {Title = "Unlock 3rd Person Zoom", Default = true}):OnChanged(function(val)
+        HubState.UnlockCamera = val
+        if not val then
+            LocalPlayer.CameraMode = Enum.CameraMode.LockFirstPerson
+        end
+    end)
 
     TabPlayer:AddToggle("SpeedToggle", {Title = "Enable Speed Modifier", Default = false}):OnChanged(function(val)
         HubState.WalkSpeedEnabled = val
@@ -1384,5 +1431,12 @@ end
 
 -- SECTION 10: INITIALIZATION
 task.spawn(function()
+    pcall(function()
+        LocalPlayer.CameraMode = Enum.CameraMode.Classic
+        LocalPlayer.CameraMaxZoomDistance = 200
+        LocalPlayer.CameraMinZoomDistance = 0.5
+        UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+        UserInputService.MouseIconEnabled = true
+    end)
     initializeFluentUI()
 end)
