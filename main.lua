@@ -1,8 +1,14 @@
 --[[
-    SEARCH FOR THE NEEDLE - ULTIMATE AUTOMATION HUB v4.1
-    Forensically Engineered & Performance Optimized
-    RGB / Rare Straw Priority, Batch Harvesting, Full Autonomous Sell-Cycle, Camera Fix & Draggable UI
-    Zero Emojis - Full Defensive Programming
+    SEARCH FOR THE NEEDLE - ULTIMATE AUTOMATION HUB v5.0
+    Forensically Engineered from Luau Decompiler Bytecode Dump
+    - Exact Multi-Grab Batching using LocalPlayer:GetAttribute("HayGrabCount") & getGrabCandidates
+    - Rainbow / RGB Straw Priority via Neon, Material, and Config.isRainbow(hayId)
+    - Auto Collect Gems via workspace.GemsClient & CollectGem(GemId)
+    - Auto-Win Needle via PickHay("Objective"), slot equip, and Farmer hand-in
+    - Full Autonomous Sell-Cycle at CollectionService:GetTagged("SellPart")
+    - Fixed Smooth Window Dragging, Minimize Button, Floating Menu Toggle & Unload Button
+    - 3rd Person Camera & Right-Click 360 Orbiting
+    - Zero Emojis - 100% Safe Execution
 ]]
 
 -- SECTION 1: CORE INFRASTRUCTURE & SAFETY SHIELD
@@ -35,6 +41,7 @@ local RunService = safeService("RunService")
 local UserInputService = safeService("UserInputService")
 local TweenService = safeService("TweenService")
 local TeleportService = safeService("TeleportService")
+local CollectionService = safeService("CollectionService")
 local CoreGui = safeService("CoreGui")
 
 local LocalPlayer = Players.LocalPlayer
@@ -54,8 +61,10 @@ end
 local HubConnections = {}
 local HubThreads = {}
 local IsHubLoaded = true
+local GlobalScreenGui = nil
+local FloatingButtonGui = nil
 
--- SECTION 2: PLACE CONTEXT DETECTION
+-- SECTION 2: PLACE CONTEXT & CONFIG
 local CURRENT_PLACE_ID = game.PlaceId
 local LOBBY_PLACE_ID = 77108422251420
 local FARMHOUSE_PLACE_ID = 108628039999641
@@ -68,16 +77,33 @@ local GAME_MODE_NAME = "Unknown"
 if IS_LOBBY then
     GAME_MODE_NAME = "Lobby"
 elseif CURRENT_PLACE_ID == FARMHOUSE_PLACE_ID then
-    GAME_MODE_NAME = "Farmhouse (Match)"
+    GAME_MODE_NAME = "Farmhouse"
 elseif CURRENT_PLACE_ID == BASEMENT_PLACE_ID then
-    GAME_MODE_NAME = "Basement (Match)"
+    GAME_MODE_NAME = "Basement"
 else
     GAME_MODE_NAME = "Place " .. tostring(CURRENT_PLACE_ID)
 end
 
+-- Require game Config if available for exact mathematical rainbow calculations
+local HaystackConfig = nil
+pcall(function()
+    local nh = ReplicatedStorage:FindFirstChild("NeedleHaystack")
+    if nh and nh:FindFirstChild("Config") then
+        HaystackConfig = require(nh.Config)
+    end
+end)
+
+local GemConfig = nil
+pcall(function()
+    local nh = ReplicatedStorage:FindFirstChild("NeedleHaystack")
+    if nh and nh:FindFirstChild("GemConfig") then
+        GemConfig = require(nh.GemConfig)
+    end
+end)
+
 -- SECTION 3: LOGGING SYSTEM
 local LogEntries = {}
-local MAX_LOGS = 80
+local MAX_LOGS = 100
 
 local function addLog(level, message)
     if not IsHubLoaded then return end
@@ -90,7 +116,7 @@ local function addLog(level, message)
     print("[NeedleHub] " .. formatted)
 end
 
-addLog("info", "Initialized v4.1 on " .. GAME_MODE_NAME)
+addLog("info", "Initialized Hub v5.0 on " .. GAME_MODE_NAME)
 
 -- SECTION 4: CHARACTER & MOVEMENT HELPERS
 local function getCharacter()
@@ -100,7 +126,7 @@ end
 local function getHRP()
     local char = getCharacter()
     if char then
-        return char:FindFirstChild("HumanoidRootPart") or char:WaitForChild("HumanoidRootPart", 5)
+        return char:FindFirstChild("HumanoidRootPart") or char:WaitForChild("HumanoidRootPart", 4)
     end
     return nil
 end
@@ -108,7 +134,7 @@ end
 local function getHumanoid()
     local char = getCharacter()
     if char then
-        return char:FindFirstChildOfClass("Humanoid") or char:WaitForChild("Humanoid", 5)
+        return char:FindFirstChildOfClass("Humanoid") or char:WaitForChild("Humanoid", 4)
     end
     return nil
 end
@@ -117,9 +143,9 @@ local function teleportTo(targetCFrame)
     local hrp = getHRP()
     if hrp and targetCFrame then
         if typeof(targetCFrame) == "Vector3" then
-            hrp.CFrame = CFrame.new(targetCFrame + Vector3.new(0, 3.2, 0))
+            hrp.CFrame = CFrame.new(targetCFrame + Vector3.new(0, 3.0, 0))
         elseif typeof(targetCFrame) == "CFrame" then
-            hrp.CFrame = targetCFrame + Vector3.new(0, 3.2, 0)
+            hrp.CFrame = targetCFrame + Vector3.new(0, 3.0, 0)
         end
         return true
     end
@@ -212,33 +238,43 @@ end
 
 bindRemotes()
 
--- SECTION 6: WORKSPACE LANDMARKS
+-- SECTION 6: WORKSPACE LANDMARKS & SELL DETECTION
 local Landmarks = {
     SellCow = Vector3.new(-163.37, 5.0, 52.0),
     FarmerNPC = Vector3.new(-161.05, 5.0, 18.3),
     HayCenter = Vector3.new(-190.0, 4.0, 45.0),
     NeedleCFrame = nil,
+    TargetNeedleHayId = nil,
 }
 
 local function scanExactLandmarks()
+    -- Farmer NPC
     local npcFolder = workspace:FindFirstChild("NPC")
     if npcFolder and npcFolder:FindFirstChild("Farmer_NPC") then
         local root = npcFolder.Farmer_NPC:FindFirstChild("HumanoidRootPart") or npcFolder.Farmer_NPC:FindFirstChildWhichIsA("BasePart")
         if root then Landmarks.FarmerNPC = root.Position end
     end
 
-    local sellModel = workspace:FindFirstChild("SellModel")
-    if sellModel then
-        local sign = sellModel:FindFirstChild("FeedSign") or sellModel:FindFirstChild("Sign")
-        if sign then
-            if sign:IsA("BasePart") then
-                Landmarks.SellCow = sign.Position
-            elseif sign:IsA("Model") and sign.PrimaryPart then
-                Landmarks.SellCow = sign.PrimaryPart.Position
+    -- Real Sell Part via CollectionService Tag "SellPart"
+    local sellParts = CollectionService:GetTagged("SellPart")
+    if #sellParts > 0 then
+        for _, sp in ipairs(sellParts) do
+            if sp:IsA("BasePart") and sp:IsDescendantOf(workspace) then
+                Landmarks.SellCow = sp.Position
+                break
+            end
+        end
+    else
+        local sellModel = workspace:FindFirstChild("SellModel")
+        if sellModel then
+            local sp = sellModel:FindFirstChild("SellPart") or sellModel:FindFirstChild("HayPile") or sellModel:FindFirstChildWhichIsA("BasePart")
+            if sp then
+                Landmarks.SellCow = sp.Position
             end
         end
     end
 
+    -- Hay Center
     local haystack = workspace:FindFirstChild("HaystackClient")
     if haystack then
         local firstPart = haystack:FindFirstChildWhichIsA("BasePart")
@@ -247,6 +283,7 @@ local function scanExactLandmarks()
         end
     end
 
+    -- Needle object in workspace
     local needleObj = workspace:FindFirstChild("The Needle") or workspace:FindFirstChild("HiddenNeedleClient")
     if needleObj then
         if needleObj:IsA("BasePart") then
@@ -261,18 +298,25 @@ end
 scanExactLandmarks()
 
 if Remotes.NeedleTargetChanged then
-    local conn = Remotes.NeedleTargetChanged.OnClientEvent:Connect(function(targetCFrame)
-        if typeof(targetCFrame) == "CFrame" then
-            Landmarks.NeedleCFrame = targetCFrame
-            addLog("info", "Needle target location updated by server")
+    local conn = Remotes.NeedleTargetChanged.OnClientEvent:Connect(function(targetArg)
+        if typeof(targetArg) == "number" then
+            Landmarks.TargetNeedleHayId = targetArg
+            addLog("info", "Needle target HayId: " .. tostring(targetArg))
+        elseif typeof(targetArg) == "CFrame" then
+            Landmarks.NeedleCFrame = targetArg
+            addLog("info", "Needle target CFrame updated")
         end
     end)
     table.insert(HubConnections, conn)
 end
 
 if Remotes.NeedleFound then
-    local conn = Remotes.NeedleFound.OnClientEvent:Connect(function(...)
-        addLog("info", "Needle found broadcast received!")
+    local conn = Remotes.NeedleFound.OnClientEvent:Connect(function(finderUserId, finderName, ...)
+        if finderUserId == LocalPlayer.UserId then
+            addLog("warn", "YOU FOUND THE NEEDLE! Delivering to farmer...")
+        else
+            addLog("info", tostring(finderName) .. " found the needle!")
+        end
     end)
     table.insert(HubConnections, conn)
 end
@@ -281,19 +325,19 @@ end
 local HubState = {
     -- Auto Farm
     AutoFarmHay = false,
-    PrioritizeRGB = true, -- Prioritize RGB / Rare high-value straws & gems
-    BatchSize = 15,
-    FarmDelay = 0.06,
+    PrioritizeRGB = true,
+    BatchMultiGrab = true,
     AutoSell = true,
-    AutoDeployDrone = true,
     AutoCollectGems = true,
     AutoWinNeedle = true,
+    AutoDeployDrone = true,
     AutoBuyUpgrades = false,
+    FarmCooldown = 0.35,
 
     -- Player Mods
     FreeMouse = true,
     UnlockCamera = true,
-    CameraZoomDistance = 18,
+    CameraZoomDistance = 22,
     WalkSpeedEnabled = false,
     WalkSpeed = 16,
     JumpHeightEnabled = false,
@@ -324,70 +368,117 @@ end
 local function getHayCapacity()
     local val = LocalPlayer:GetAttribute("HayCapacity")
     if val and type(val) == "number" then return val end
-    return 30
+    return 25
 end
 
+local function getGrabCount()
+    local val = LocalPlayer:GetAttribute("HayGrabCount")
+    if val and type(val) == "number" and val > 0 then return val end
+    return 4 -- Default high grab
+end
+
+local function getGrabRadius()
+    local val = LocalPlayer:GetAttribute("HayGrabRadius")
+    if val and type(val) == "number" and val > 0 then return val end
+    return 2.5
+end
+
+local function getPickCooldown()
+    local val = LocalPlayer:GetAttribute("HayPickCooldown")
+    if val and type(val) == "number" and val > 0 then return val end
+    return 0.35
+end
+
+-- Snap camera to 3rd person
 local function forceSnap3rdPerson(distance)
     pcall(function()
         local dist = distance or HubState.CameraZoomDistance
         LocalPlayer.CameraMode = Enum.CameraMode.Classic
         LocalPlayer.CameraMaxZoomDistance = 350
         LocalPlayer.CameraMinZoomDistance = dist
-        task.wait(0.04)
+        task.wait(0.05)
         LocalPlayer.CameraMinZoomDistance = 0.5
         addLog("info", "Camera zoomed to 3rd person (" .. dist .. " studs)")
     end)
 end
 
--- FORENSIC DETECTOR: Identify RGB, Rainbow, or Special high-value straws/gems
-local function isRgbOrSpecial(part)
+-- Exact Rainbow / RGB Detector
+local function isRainbowStrand(part)
     if not part or not part:IsA("BasePart") then return false end
 
-    -- Check direct name keywords
-    local lowerName = string.lower(part.Name)
-    if string.find(lowerName, "rgb") or string.find(lowerName, "rainbow") or string.find(lowerName, "gem") or string.find(lowerName, "diamond") or string.find(lowerName, "crystal") then
-        return true
-    end
+    -- Check direct Rainbow attribute
+    if part:GetAttribute("Rainbow") == true then return true end
 
-    -- Check parent folder
-    if part.Parent then
-        local pName = string.lower(part.Parent.Name)
-        if string.find(pName, "gem") or string.find(pName, "dropped") then
-            return true
-        end
-    end
-
-    -- Check Material & Visuals
+    -- Check Neon material (Rainbow strands in NeedleHaystackClient are Neon)
     if part.Material == Enum.Material.Neon or part.Material == Enum.Material.ForceField then
         return true
     end
-    if part:FindFirstChildWhichIsA("ParticleEmitter") or part:FindFirstChildWhichIsA("Highlight") or part:FindFirstChildWhichIsA("PointLight") then
-        return true
+
+    -- Mathematical check via Config.isRainbow(hayId)
+    local hayId = part:GetAttribute("HayId")
+    if hayId and HaystackConfig and HaystackConfig.isRainbow then
+        local s, res = pcall(HaystackConfig.isRainbow, hayId)
+        if s and res == true then return true end
     end
 
-    -- Check Color: Normal straw is yellow/tan (Hue between 0.08 and 0.17)
-    -- RGB / Special straw has Hue outside 0.08..0.17 with saturation > 0.35
+    -- Color check: Normal hay is tan/yellow (Hue 0.08..0.17). Rainbow has Hue outside yellow with saturation
     local h, s, v = part.Color:ToHSV()
     if s > 0.35 and (h < 0.08 or h > 0.17) then
-        return true
-    end
-
-    -- Check Attributes
-    if part:GetAttribute("Tier") or part:GetAttribute("Multiplier") or part:GetAttribute("Special") or part:GetAttribute("Rgb") then
         return true
     end
 
     return false
 end
 
+-- Exact Candidate Gathering (replicated from NeedleHaystackClient getGrabCandidates)
+local function getGrabCandidates(primaryPart)
+    local grabCount = getGrabCount()
+    local grabRadius = getGrabRadius()
+
+    if grabCount <= 1 or grabRadius <= 0 then
+        return {}
+    end
+
+    local haystack = workspace:FindFirstChild("HaystackClient")
+    if not haystack then return {} end
+
+    local pos = primaryPart.Position
+    local candidateList = {}
+
+    -- Use GetPartBoundsInRadius for efficient cluster lookup
+    local parts = workspace:GetPartBoundsInRadius(pos, grabRadius)
+    for _, p in ipairs(parts) do
+        if p ~= primaryPart and p.Parent == haystack and p:IsA("BasePart") then
+            local hayId = p:GetAttribute("HayId")
+            if hayId then
+                local dist = (p.Position - pos).Magnitude
+                if dist <= grabRadius then
+                    table.insert(candidateList, {id = hayId, dist = dist})
+                end
+            end
+        end
+    end
+
+    table.sort(candidateList, function(a, b) return a.dist < b.dist end)
+
+    local candidateIds = {}
+    local maxCandidates = math.min(grabCount - 1, #candidateList)
+    for i = 1, maxCandidates do
+        table.insert(candidateIds, candidateList[i].id)
+    end
+
+    return candidateIds
+end
+
 -- SECTION 8: AUTOMATION ENGINES
 
--- 8.1 FAST BATCH AUTO-FARM ENGINE WITH RGB PRIORITY
+-- 8.1 FAST BATCH AUTO-FARM ENGINE (MULTI-GRAB + RGB PRIORITY + AUTO-SELL)
 local isCurrentlySelling = false
 
 local farmThread = task.spawn(function()
     while IsHubLoaded do
-        task.wait(HubState.FarmDelay)
+        local cooldown = getPickCooldown()
+        task.wait(cooldown)
 
         if HubState.AutoFarmHay and IS_GAMEPLAY and not isCurrentlySelling then
             local hrp = getHRP()
@@ -403,10 +494,11 @@ local farmThread = task.spawn(function()
                     addLog("info", "Bag full (" .. currentHay .. "/" .. maxCap .. "). Travelling to Sell Cow...")
 
                     local farmReturnCFrame = hrp.CFrame
+                    scanExactLandmarks()
 
-                    -- Teleport to Cow
+                    -- Teleport to Cow / Sell Part
                     teleportTo(Landmarks.SellCow)
-                    task.wait(0.25)
+                    task.wait(0.2)
 
                     -- Fire Sell Remote
                     if Remotes.SellHay then
@@ -416,119 +508,100 @@ local farmThread = task.spawn(function()
                     -- Wait until confirmed sold
                     local sellTimeout = os.clock()
                     while getHayHeld() > 0 and (os.clock() - sellTimeout) < 0.6 do
-                        task.wait(0.05)
+                        task.wait(0.06)
                         if Remotes.SellHay then pcall(function() Remotes.SellHay:FireServer() end) end
                     end
 
                     addLog("info", "Hay sold! Returning to harvest...")
 
-                    -- Teleport back to hay mound
+                    -- Teleport back to hay pile
                     teleportTo(farmReturnCFrame)
-                    task.wait(0.15)
+                    task.wait(0.12)
 
                     isCurrentlySelling = false
                 else
-                    -- HARVESTING HAY (PRIORITIZING RGB / RARE STRAWS)
                     local myPos = hrp.Position
-                    local rgbTargets = {}
-                    local normalCandidates = {}
-
-                    -- A. Check GemsClient & DroppedHay first for high-value RGBs
-                    local gemsFolder = workspace:FindFirstChild("GemsClient")
-                    if gemsFolder then
-                        for _, gem in ipairs(gemsFolder:GetChildren()) do
-                            if gem:IsA("BasePart") and (gem.Position - myPos).Magnitude <= 35 then
-                                table.insert(rgbTargets, gem)
-                            end
-                        end
-                    end
-
-                    local droppedFolder = workspace:FindFirstChild("DroppedHay")
-                    if droppedFolder then
-                        for _, drop in ipairs(droppedFolder:GetChildren()) do
-                            if drop:IsA("BasePart") and (drop.Position - myPos).Magnitude <= 35 then
-                                table.insert(rgbTargets, drop)
-                            end
-                        end
-                    end
-
-                    -- B. Query strands in HaystackClient
                     local haystack = workspace:FindFirstChild("HaystackClient")
+
                     if haystack then
                         local children = haystack:GetChildren()
                         local total = #children
-                        if total > 0 then
-                            for i = 1, math.min(total, 80) do
-                                local child = children[i]
-                                if child and child:IsA("BasePart") then
-                                    local dist = (child.Position - myPos).Magnitude
-                                    if dist <= 28 then
-                                        local id = tonumber(child.Name) or tonumber(child:GetAttribute("Id"))
-                                        if isRgbOrSpecial(child) then
-                                            table.insert(rgbTargets, child)
-                                        elseif id then
-                                            table.insert(normalCandidates, id)
+
+                        -- 1. SCAN FOR RAINBOW / RGB STRAWS FIRST
+                        local targetRainbowPart = nil
+                        if HubState.PrioritizeRGB and total > 0 then
+                            for i = 1, math.min(total, 400) do
+                                local p = children[i]
+                                if p and p:IsA("BasePart") and isRainbowStrand(p) then
+                                    targetRainbowPart = p
+                                    break
+                                end
+                            end
+                        end
+
+                        -- IF RAINBOW FOUND: TELEPORT & HARVEST WITH FULL CANDIDATES
+                        if targetRainbowPart then
+                            local rId = targetRainbowPart:GetAttribute("HayId")
+                            if rId and Remotes.PickHay then
+                                -- Teleport close to rainbow straw to satisfy server distance check
+                                teleportTo(targetRainbowPart.Position + Vector3.new(0, 1.5, 0))
+                                task.wait(0.04)
+
+                                local candidates = getGrabCandidates(targetRainbowPart)
+                                pcall(function()
+                                    Remotes.PickHay:FireServer(rId, candidates)
+                                end)
+                                addLog("info", "Harvested RAINBOW straw [" .. rId .. "] + " .. #candidates .. " batch!")
+                            end
+                        else
+                            -- 2. NORMAL HAY BATCH HARVESTING
+                            local primaryPart = nil
+                            local minDistance = 9999
+
+                            if total > 0 then
+                                for i = 1, math.min(total, 120) do
+                                    local p = children[i]
+                                    if p and p:IsA("BasePart") then
+                                        local dist = (p.Position - myPos).Magnitude
+                                        if dist < minDistance then
+                                            minDistance = dist
+                                            primaryPart = p
                                         end
                                     end
+                                end
+                            end
+
+                            if primaryPart then
+                                -- If too far, teleport onto the haystack
+                                if minDistance > 16 then
+                                    teleportTo(primaryPart.Position + Vector3.new(0, 1.8, 0))
+                                    task.wait(0.04)
+                                end
+
+                                local pId = primaryPart:GetAttribute("HayId")
+                                if pId and Remotes.PickHay then
+                                    local candidates = getGrabCandidates(primaryPart)
+                                    pcall(function()
+                                        Remotes.PickHay:FireServer(pId, candidates)
+                                    end)
                                 end
                             end
                         end
                     end
 
-                    -- 1. EXECUTE RGB / RARE TARGETS FIRST
-                    if HubState.PrioritizeRGB and #rgbTargets > 0 then
-                        for _, target in ipairs(rgbTargets) do
-                            local id = tonumber(target.Name) or tonumber(target:GetAttribute("Id"))
-                            if id and Remotes.PickHay then
-                                pcall(function() Remotes.PickHay:FireServer(id) end)
-                            end
-                            if Remotes.PickHay then
-                                pcall(function() Remotes.PickHay:FireServer(target.Position) end)
-                            end
-                            if Remotes.CollectGem and (target.Parent == gemsFolder or string.find(string.lower(target.Name), "gem")) then
-                                pcall(function() Remotes.CollectGem:FireServer(target) end)
-                            end
-                            if Remotes.PitchforkDig then
-                                pcall(function() Remotes.PitchforkDig:FireServer(target.Position) end)
-                            end
-                        end
-                    end
-
-                    -- 2. EXECUTE NORMAL STRANDS IN BATCH
-                    if Remotes.PickHay and #normalCandidates > 0 then
-                        for idx, id in ipairs(normalCandidates) do
-                            if idx > HubState.BatchSize then break end
-                            pcall(function() Remotes.PickHay:FireServer(id) end)
-                        end
-                    end
-
-                    -- 3. Burst around HoveredHayId if raycaster locked onto a straw
-                    local hoveredId = LocalPlayer:GetAttribute("HoveredHayId")
-                    if hoveredId and type(hoveredId) == "number" and hoveredId > 0 then
-                        if Remotes.PickHay then
-                            for offset = -3, 3 do
-                                pcall(function() Remotes.PickHay:FireServer(hoveredId + offset) end)
-                            end
-                        end
-                    end
-
-                    -- 4. Pitchfork Ground Dig Burst
+                    -- Burst tool actions if available
                     if Remotes.PitchforkDig then
-                        for i = 1, 4 do
-                            local angle = (i / 4) * math.pi * 2
-                            local offset = Vector3.new(math.cos(angle) * 1.5, 0, math.sin(angle) * 1.5)
-                            pcall(function() Remotes.PitchforkDig:FireServer(myPos - Vector3.new(0, 2.5, 0) + offset) end)
-                        end
+                        pcall(function() Remotes.PitchforkDig:FireServer(myPos - Vector3.new(0, 2.0, 0)) end)
                     end
-
-                    -- 5. Vacuum Dropped Hay Pieces
                     if Remotes.PickDroppedHay then
-                        pcall(function() Remotes.PickDroppedHay:FireServer() end)
-                    end
-
-                    -- 6. Trigger tool state
-                    if Remotes.HeldToolState then
-                        pcall(function() Remotes.HeldToolState:FireServer("Pitchfork", "dig") end)
+                        local dropped = workspace:FindFirstChild("DroppedHay")
+                        if dropped then
+                            for _, d in ipairs(dropped:GetChildren()) do
+                                if d:IsA("BasePart") and (d.Position - myPos).Magnitude <= 20 then
+                                    pcall(function() Remotes.PickDroppedHay:FireServer(d) end)
+                                end
+                            end
+                        end
                     end
                 end
             end
@@ -537,71 +610,142 @@ local farmThread = task.spawn(function()
 end)
 table.insert(HubThreads, farmThread)
 
--- 8.2 AUTO-BUY UPGRADES ENGINE
-task.spawn(function()
+-- 8.2 AUTO COLLECT GEMS ENGINE
+local gemThread = task.spawn(function()
     while IsHubLoaded do
-        task.wait(3)
-        if HubState.AutoBuyUpgrades and IS_GAMEPLAY and Remotes.BuyUpgrade then
-            pcall(function()
-                Remotes.BuyUpgrade:FireServer("ExtraTakeAmount")
-                task.wait(0.2)
-                Remotes.BuyUpgrade:FireServer("ExtraHoldAmount")
-                task.wait(0.2)
-                Remotes.BuyUpgrade:FireServer("ExtraHayValuePercentage")
-            end)
+        task.wait(0.8)
+        if HubState.AutoCollectGems and IS_GAMEPLAY and Remotes.CollectGem then
+            local gemsFolder = workspace:FindFirstChild("GemsClient")
+            local hrp = getHRP()
+            if gemsFolder and hrp then
+                local myPos = hrp.Position
+                for _, g in ipairs(gemsFolder:GetChildren()) do
+                    local gemId = g:GetAttribute("GemId")
+                    if not gemId and g:IsA("Model") then
+                        for _, kid in ipairs(g:GetDescendants()) do
+                            if kid:GetAttribute("GemId") then
+                                gemId = kid:GetAttribute("GemId")
+                                break
+                            end
+                        end
+                    end
+
+                    if gemId then
+                        local gemPos = g:IsA("BasePart") and g.Position or (g:IsA("Model") and g:GetPivot().Position or nil)
+                        if gemPos then
+                            local dist = (gemPos - myPos).Magnitude
+                            -- Server COLLECT_DISTANCE is 30 studs
+                            if dist <= 28 then
+                                pcall(function() Remotes.CollectGem:FireServer(gemId) end)
+                                addLog("info", "Collected Gem [" .. tostring(gemId) .. "] within reach")
+                            elseif HubState.AutoFarmHay and dist <= 45 then
+                                -- Quick hop to grab gem
+                                local prev = hrp.CFrame
+                                teleportTo(gemPos + Vector3.new(0, 1.5, 0))
+                                task.wait(0.05)
+                                pcall(function() Remotes.CollectGem:FireServer(gemId) end)
+                                teleportTo(prev)
+                            end
+                        else
+                            pcall(function() Remotes.CollectGem:FireServer(gemId) end)
+                        end
+                    end
+                end
+            end
         end
     end
 end)
+table.insert(HubThreads, gemThread)
+
+if Remotes.GemSpawned then
+    local conn = Remotes.GemSpawned.OnClientEvent:Connect(function(gemId)
+        if HubState.AutoCollectGems and Remotes.CollectGem and gemId then
+            pcall(function() Remotes.CollectGem:FireServer(gemId) end)
+        end
+    end)
+    table.insert(HubConnections, conn)
+end
 
 -- 8.3 AUTO-WIN NEEDLE ENGINE
 local needleThread = task.spawn(function()
     while IsHubLoaded do
-        task.wait(0.5)
+        task.wait(0.4)
         if HubState.AutoWinNeedle and IS_GAMEPLAY then
             local needleOwned = LocalPlayer:GetAttribute("NeedleOwned")
 
             if needleOwned then
-                addLog("info", "Needle is in your hands! Delivering to Farmer NPC for victory...")
+                addLog("warn", "Needle is in your hands! Teleporting to Farmer NPC for victory...")
+                scanExactLandmarks()
                 teleportTo(Landmarks.FarmerNPC)
-                task.wait(0.3)
+                task.wait(0.2)
+
+                -- Equip needle tool if in Backpack
+                local char = getCharacter()
+                local bp = LocalPlayer:FindFirstChild("Backpack")
+                if bp and char then
+                    for _, tool in ipairs(bp:GetChildren()) do
+                        if tool:IsA("Tool") and string.find(string.lower(tool.Name), "needle") then
+                            tool.Parent = char
+                            break
+                        end
+                    end
+                end
+
+                -- Fire hand-in remote
                 if Remotes.NeedleHandIn then
                     pcall(function() Remotes.NeedleHandIn:FireServer() end)
-                    addLog("info", "Delivered needle! Round Won!")
                 end
-            else
-                local needle = workspace:FindFirstChild("The Needle") or workspace:FindFirstChild("HiddenNeedleClient")
-                if needle then
-                    local needlePart = nil
-                    if needle:IsA("BasePart") then needlePart = needle
-                    elseif needle:IsA("Model") then needlePart = needle.PrimaryPart or needle:FindFirstChildWhichIsA("BasePart") end
 
-                    if needlePart then
-                        addLog("info", "Needle detected in world! Teleporting to pick it up...")
-                        local hrp = getHRP()
-                        if hrp then
-                            hrp.CFrame = CFrame.new(needlePart.Position + Vector3.new(0, 1.2, 0))
-                            task.wait(0.12)
-                            if firetouchinterest then
-                                pcall(function()
-                                    firetouchinterest(hrp, needlePart, 0)
-                                    task.wait(0.04)
-                                    firetouchinterest(hrp, needlePart, 1)
-                                end)
-                            end
-                            if Remotes.PickHay then
-                                pcall(function() Remotes.PickHay:FireServer(needlePart.Position) end)
-                            end
-                            if Remotes.PickDroppedHay then
-                                pcall(function() Remotes.PickDroppedHay:FireServer() end)
+                -- Trigger any proximity prompts on farmer
+                local farmer = workspace:FindFirstChild("NPC") and workspace.NPC:FindFirstChild("Farmer_NPC")
+                if farmer then
+                    for _, prompt in ipairs(farmer:GetDescendants()) do
+                        if prompt:IsA("ProximityPrompt") then
+                            pcall(function() fireproximityprompt(prompt) end)
+                        end
+                    end
+                end
+                addLog("info", "Handed in needle to Farmer NPC! Match Won!")
+                task.wait(2)
+            else
+                -- Scan for Needle Part in workspace or target HayId
+                local needlePart = nil
+                local targetHayId = Landmarks.TargetNeedleHayId
+
+                if targetHayId then
+                    local haystack = workspace:FindFirstChild("HaystackClient")
+                    if haystack then
+                        for _, p in ipairs(haystack:GetChildren()) do
+                            if p:IsA("BasePart") and p:GetAttribute("HayId") == targetHayId then
+                                needlePart = p
+                                break
                             end
                         end
                     end
-                elseif Landmarks.NeedleCFrame then
-                    local hrp = getHRP()
-                    if hrp then
-                        hrp.CFrame = Landmarks.NeedleCFrame + Vector3.new(0, 1.2, 0)
-                        task.wait(0.12)
-                        if Remotes.PickHay then pcall(function() Remotes.PickHay:FireServer(Landmarks.NeedleCFrame.Position) end) end
+                end
+
+                if not needlePart then
+                    -- Scan for IsNeedleObjective attribute or name
+                    for _, obj in ipairs(workspace:GetChildren()) do
+                        if obj:GetAttribute("IsNeedleObjective") == true or string.find(string.lower(obj.Name), "needle") then
+                            if obj:IsA("BasePart") then needlePart = obj
+                            elseif obj:IsA("Model") then needlePart = obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart") end
+                            break
+                        end
+                    end
+                end
+
+                if needlePart then
+                    addLog("info", "Needle detected! Teleporting to pick it up...")
+                    teleportTo(needlePart.Position + Vector3.new(0, 1.2, 0))
+                    task.wait(0.08)
+
+                    -- Game fires PickHay with "Objective" to grab the needle
+                    if Remotes.PickHay then
+                        pcall(function() Remotes.PickHay:FireServer("Objective") end)
+                    end
+                    if Remotes.PickHay and needlePart:GetAttribute("HayId") then
+                        pcall(function() Remotes.PickHay:FireServer(needlePart:GetAttribute("HayId")) end)
                     end
                 end
             end
@@ -624,37 +768,23 @@ local droneThread = task.spawn(function()
 end)
 table.insert(HubThreads, droneThread)
 
--- 8.5 AUTO COLLECT GEMS
-local gemThread = task.spawn(function()
+-- 8.5 AUTO-BUY UPGRADES
+task.spawn(function()
     while IsHubLoaded do
-        task.wait(1.2)
-        if HubState.AutoCollectGems and IS_GAMEPLAY and Remotes.CollectGem then
-            local hrp = getHRP()
-            if hrp then
-                for _, obj in ipairs(workspace:GetDescendants()) do
-                    if obj:IsA("BasePart") and string.find(string.lower(obj.Name), "gem") then
-                        local dist = (hrp.Position - obj.Position).Magnitude
-                        if dist <= 40 then
-                            pcall(function() Remotes.CollectGem:FireServer(obj) end)
-                        end
-                    end
-                end
-            end
+        task.wait(3)
+        if HubState.AutoBuyUpgrades and IS_GAMEPLAY and Remotes.BuyUpgrade then
+            pcall(function()
+                Remotes.BuyUpgrade:FireServer("ExtraTakeAmount")
+                task.wait(0.2)
+                Remotes.BuyUpgrade:FireServer("ExtraHoldAmount")
+                task.wait(0.2)
+                Remotes.BuyUpgrade:FireServer("ExtraHayValuePercentage")
+            end)
         end
     end
 end)
-table.insert(HubThreads, gemThread)
 
-if Remotes.GemSpawned then
-    local conn = Remotes.GemSpawned.OnClientEvent:Connect(function(gemObj)
-        if HubState.AutoCollectGems and Remotes.CollectGem and gemObj then
-            pcall(function() Remotes.CollectGem:FireServer(gemObj) end)
-        end
-    end)
-    table.insert(HubConnections, conn)
-end
-
--- 8.6 CAMERA & MOUSE UNLOCKER
+-- 8.6 CAMERA 3RD PERSON & MOUSE FREEDOM CONTROLLER
 local function applyCameraAndMouse()
     if HubState.UnlockCamera then
         if LocalPlayer.CameraMode ~= Enum.CameraMode.Classic then
@@ -667,20 +797,22 @@ local function applyCameraAndMouse()
     end
 
     if HubState.FreeMouse then
+        -- If RMB is held down, lock mouse so user can rotate camera 360 degrees
         local isHoldingRMB = UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
-        if not isHoldingRMB then
+        if isHoldingRMB then
+            UserInputService.MouseBehavior = Enum.MouseBehavior.LockCurrentPosition
+        else
             UserInputService.MouseBehavior = Enum.MouseBehavior.Default
-            UserInputService.MouseIconEnabled = true
         end
-    else
-        UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter
+        UserInputService.MouseIconEnabled = true
     end
 end
 
+-- Hotkey: LeftAlt or Insert to toggle mouse freedom
 local hotkeyConn = UserInputService.InputBegan:Connect(function(input, gpe)
     if not gpe and (input.KeyCode == Enum.KeyCode.LeftAlt or input.KeyCode == Enum.KeyCode.Insert) then
         HubState.FreeMouse = not HubState.FreeMouse
-        addLog("info", "Mouse Mode: " .. (HubState.FreeMouse and "FREE (Click UI)" or "LOCKED (Camera Control)"))
+        addLog("info", "Mouse Mode: " .. (HubState.FreeMouse and "FREE (Click UI / Hold RMB to look)" or "LOCKED"))
     end
 end)
 table.insert(HubConnections, hotkeyConn)
@@ -776,7 +908,7 @@ local jumpConn = UserInputService.JumpRequest:Connect(function()
 end)
 table.insert(HubConnections, jumpConn)
 
--- 8.8 ESP SYSTEM (INCLUDING RGB / RARE STRAWS)
+-- 8.8 ESP SYSTEM
 local ESPFolder = Instance.new("Folder")
 ESPFolder.Name = "NeedleHub_ESP"
 pcall(function() ESPFolder.Parent = CoreGui or workspace end)
@@ -854,15 +986,25 @@ local espThread = task.spawn(function()
         -- 2. Needle ESP
         if HubState.NeedleESP and IS_GAMEPLAY then
             local needle = workspace:FindFirstChild("The Needle") or workspace:FindFirstChild("HiddenNeedleClient")
-            local needlePart = nil
-            if needle then
-                if needle:IsA("BasePart") then needlePart = needle
-                elseif needle:IsA("Model") then needlePart = needle.PrimaryPart or needle:FindFirstChildWhichIsA("BasePart") end
-            end
+            local targetHayId = Landmarks.TargetNeedleHayId
 
-            if needlePart then
-                local dist = math.floor((myPos - needlePart.Position).Magnitude)
-                updateBillboard("Needle", needlePart, "NEEDLE HERE! [" .. dist .. "m]", Color3.fromRGB(255, 230, 0))
+            if needle then
+                local p = needle:IsA("BasePart") and needle or (needle:IsA("Model") and (needle.PrimaryPart or needle:FindFirstChildWhichIsA("BasePart")))
+                if p then
+                    local dist = math.floor((myPos - p.Position).Magnitude)
+                    updateBillboard("Needle", p, "THE NEEDLE [" .. dist .. "m]", Color3.fromRGB(255, 230, 0))
+                end
+            elseif targetHayId then
+                local haystack = workspace:FindFirstChild("HaystackClient")
+                if haystack then
+                    for _, p in ipairs(haystack:GetChildren()) do
+                        if p:IsA("BasePart") and p:GetAttribute("HayId") == targetHayId then
+                            local dist = math.floor((myPos - p.Position).Magnitude)
+                            updateBillboard("Needle", p, "THE NEEDLE [" .. dist .. "m]", Color3.fromRGB(255, 230, 0))
+                            break
+                        end
+                    end
+                end
             else
                 removeBillboard("Needle")
             end
@@ -870,65 +1012,52 @@ local espThread = task.spawn(function()
             removeBillboard("Needle")
         end
 
-        -- 3. RGB / Rare Straws ESP
-        if HubState.RgbESP and IS_GAMEPLAY then
-            local rgbCount = 1
-            local haystack = workspace:FindFirstChild("HaystackClient")
-            if haystack then
-                local children = haystack:GetChildren()
-                for i = 1, math.min(#children, 100) do
-                    local child = children[i]
-                    if child and child:IsA("BasePart") and isRgbOrSpecial(child) then
-                        local dist = math.floor((myPos - child.Position).Magnitude)
-                        updateBillboard("RGB_" .. rgbCount, child, "RGB STRAW [" .. dist .. "m]", Color3.fromRGB(255, 50, 220))
-                        rgbCount = rgbCount + 1
-                        if rgbCount > 15 then break end
+        -- 3. Gem ESP
+        if HubState.GemESP and IS_GAMEPLAY then
+            local gemsFolder = workspace:FindFirstChild("GemsClient")
+            if gemsFolder then
+                for _, gem in ipairs(gemsFolder:GetChildren()) do
+                    if gem:IsA("BasePart") then
+                        local dist = math.floor((myPos - gem.Position).Magnitude)
+                        updateBillboard("Gem_" .. gem.Name, gem, "GEM [" .. dist .. "m]", Color3.fromRGB(120, 255, 120))
+                    elseif gem:IsA("Model") then
+                        local p = gem.PrimaryPart or gem:FindFirstChildWhichIsA("BasePart")
+                        if p then
+                            local dist = math.floor((myPos - p.Position).Magnitude)
+                            updateBillboard("Gem_" .. gem.Name, p, "GEM [" .. dist .. "m]", Color3.fromRGB(120, 255, 120))
+                        end
                     end
                 end
             end
-            for k in pairs(activeBillboards) do
-                if string.find(k, "RGB_") then
-                    local idx = tonumber(string.sub(k, 5))
-                    if idx and idx >= rgbCount then removeBillboard(k) end
-                end
-            end
-        else
-            for k in pairs(activeBillboards) do
-                if string.find(k, "RGB_") then removeBillboard(k) end
-            end
         end
 
-        -- 4. Gem ESP
-        if HubState.GemESP and IS_GAMEPLAY then
-            local gemIndex = 1
-            for _, obj in ipairs(workspace:GetDescendants()) do
-                if obj:IsA("BasePart") and string.find(string.lower(obj.Name), "gem") then
-                    local dist = math.floor((myPos - obj.Position).Magnitude)
-                    updateBillboard("Gem_" .. gemIndex, obj, "GEM [" .. dist .. "m]", Color3.fromRGB(60, 255, 120))
-                    gemIndex = gemIndex + 1
-                    if gemIndex > 10 then break end
+        -- 4. RGB Straw ESP
+        if HubState.RgbESP and IS_GAMEPLAY then
+            local haystack = workspace:FindFirstChild("HaystackClient")
+            if haystack then
+                local count = 0
+                for _, p in ipairs(haystack:GetChildren()) do
+                    if p:IsA("BasePart") and isRainbowStrand(p) then
+                        count = count + 1
+                        if count <= 25 then
+                            local dist = math.floor((myPos - p.Position).Magnitude)
+                            updateBillboard("RGB_" .. tostring(p:GetAttribute("HayId") or count), p, "RGB STRAW [" .. dist .. "m]", Color3.fromRGB(255, 100, 255))
+                        end
+                    end
                 end
-            end
-        else
-            for k in pairs(activeBillboards) do
-                if string.find(k, "Gem_") then removeBillboard(k) end
             end
         end
 
         -- 5. Player ESP
         if HubState.PlayerESP then
-            for _, p in ipairs(Players:GetPlayers()) do
-                if p ~= LocalPlayer and p.Character then
-                    local hrp = p.Character:FindFirstChild("HumanoidRootPart")
-                    if hrp then
-                        local dist = math.floor((myPos - hrp.Position).Magnitude)
-                        updateBillboard("Player_" .. p.UserId, hrp, p.DisplayName .. " [" .. dist .. "m]", Color3.fromRGB(240, 240, 255))
+            for _, plr in ipairs(Players:GetPlayers()) do
+                if plr ~= LocalPlayer and plr.Character then
+                    local pRoot = plr.Character:FindFirstChild("HumanoidRootPart")
+                    if pRoot then
+                        local dist = math.floor((myPos - pRoot.Position).Magnitude)
+                        updateBillboard("Player_" .. plr.Name, pRoot, plr.DisplayName .. " [" .. dist .. "m]", Color3.fromRGB(255, 255, 255))
                     end
                 end
-            end
-        else
-            for k in pairs(activeBillboards) do
-                if string.find(k, "Player_") then removeBillboard(k) end
             end
         end
     end
@@ -937,98 +1066,89 @@ table.insert(HubThreads, espThread)
 
 -- 8.9 LOBBY AUTOMATION
 local KNOWN_CODES = {
-    "Launch", "Release", "Update", "1KLikes", "5KLikes",
-    "10KLikes", "100KVisits", "GEMS", "NEEDLE", "HAY"
+    "Launch", "Release", "Update", "1KLikes", "5KLikes", "10KLikes",
+    "100KVisits", "Needle", "Haystack", "Lucky", "Win"
 }
 
-local function redeemAllCodes()
+local function redeemAllCodes(userCode)
     if not Remotes.RedeemCode then
-        addLog("warn", "Code redemption is only available in the Lobby!")
+        addLog("warn", "RedeemCode remote not found in current place")
         return
     end
-
-    task.spawn(function()
-        for _, code in ipairs(KNOWN_CODES) do
-            pcall(function()
-                local res = Remotes.RedeemCode:InvokeServer(code)
-                addLog("info", "Code [" .. code .. "]: " .. tostring(res))
-            end)
-            task.wait(0.5)
-        end
-    end)
-end
-
-local function autoRollClassLoop()
-    task.spawn(function()
-        while HubState.AutoRollClass and IsHubLoaded do
-            if not Remotes.RollClass then
-                addLog("warn", "RollClass is only available in the Lobby!")
-                break
-            end
-
-            local ok, result = pcall(function() return Remotes.RollClass:InvokeServer() end)
-            if ok and result then
-                addLog("info", "Rolled: " .. tostring(result))
-                if tostring(result) == HubState.TargetClass then
-                    addLog("info", "Target class obtained: " .. HubState.TargetClass)
-                    HubState.AutoRollClass = false
-                    break
-                end
-            else
-                addLog("warn", "Roll stopped (insufficient gems or error)")
-                task.wait(2)
-            end
-            task.wait(0.8)
-        end
-    end)
-end
-
--- 8.10 UNLOAD HUB
-local GlobalScreenGui = nil
-
-local function unloadHub()
-    IsHubLoaded = false
-    addLog("warn", "Unloading Needle Hub completely...")
-
-    for _, conn in ipairs(HubConnections) do
-        pcall(function() conn:Disconnect() end)
+    addLog("info", "Redeeming known codes...")
+    for _, code in ipairs(KNOWN_CODES) do
+        pcall(function()
+            Remotes.RedeemCode:InvokeServer(code)
+            task.wait(0.25)
+        end)
     end
-    table.clear(HubConnections)
+    if userCode and userCode ~= "" then
+        pcall(function()
+            Remotes.RedeemCode:InvokeServer(userCode)
+        end)
+    end
+    addLog("info", "Code redemption batch finished.")
+end
+
+-- 8.10 UNLOAD / DESTROY HUB
+local function unloadHub()
+    addLog("warn", "Unloading Needle Hub completely...")
+    IsHubLoaded = false
+
+    for _, thread in ipairs(HubThreads) do
+        pcall(function() task.cancel(thread) end)
+    end
+    for _, conn in ipairs(HubConnections) do
+        pcall(function()
+            if typeof(conn) == "RBXScriptConnection" then
+                conn:Disconnect()
+            elseif type(conn) == "table" and conn.Disconnect then
+                conn:Disconnect()
+            end
+        end)
+    end
 
     toggleFly(false)
 
-    local hum = getHumanoid()
-    if hum then hum.WalkSpeed = 16 end
+    pcall(function() if ESPFolder then ESPFolder:Destroy() end end)
+    pcall(function() if GlobalScreenGui then GlobalScreenGui:Destroy() end end)
+    pcall(function() if FloatingButtonGui then FloatingButtonGui:Destroy() end end)
 
-    pcall(function() ESPFolder:Destroy() end)
+    -- Reset camera & mouse
+    pcall(function()
+        LocalPlayer.CameraMode = Enum.CameraMode.Classic
+        LocalPlayer.CameraMaxZoomDistance = 350
+        LocalPlayer.CameraMinZoomDistance = 0.5
+        UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+        UserInputService.MouseIconEnabled = true
+    end)
 
-    if GlobalScreenGui then
-        pcall(function() GlobalScreenGui:Destroy() end)
-        GlobalScreenGui = nil
-    end
-
-    addLog("info", "Needle Hub unloaded successfully.")
+    addLog("info", "Needle Hub unloaded cleanly.")
 end
 
--- SECTION 9: USER INTERFACE
+-- SECTION 9: USER INTERFACE (NATIVE GUI & DRAGGABLE TITLE BAR)
 
+-- Floating Toggle Button on screen
 local function createFloatingToggleButton(toggleCallback)
+    if FloatingButtonGui then FloatingButtonGui:Destroy() end
+
     local floatGui = Instance.new("ScreenGui")
-    floatGui.Name = "NeedleFloatGui"
+    floatGui.Name = "NeedleHubFloatingBtn"
     floatGui.ResetOnSpawn = false
     floatGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
     pcall(function() floatGui.Parent = CoreGui end)
     if not floatGui.Parent then floatGui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
+    FloatingButtonGui = floatGui
 
     local floatBtn = Instance.new("TextButton")
-    floatBtn.Name = "FloatButton"
-    floatBtn.Size = UDim2.fromOffset(110, 32)
-    floatBtn.Position = UDim2.new(0, 16, 0.5, -60)
-    floatBtn.BackgroundColor3 = Color3.fromRGB(24, 24, 34)
+    floatBtn.Name = "MenuToggle"
+    floatBtn.Size = UDim2.fromOffset(115, 34)
+    floatBtn.Position = UDim2.new(0, 16, 0.45, 0)
+    floatBtn.BackgroundColor3 = Color3.fromRGB(30, 32, 45)
     floatBtn.Text = "Needle Hub"
-    floatBtn.TextColor3 = Color3.fromRGB(220, 220, 255)
+    floatBtn.TextColor3 = Color3.fromRGB(240, 240, 255)
     floatBtn.Font = Enum.Font.GothamBold
-    floatBtn.TextSize = 12
+    floatBtn.TextSize = 13
     floatBtn.Parent = floatGui
 
     local corner = Instance.new("UICorner")
@@ -1036,34 +1156,45 @@ local function createFloatingToggleButton(toggleCallback)
     corner.Parent = floatBtn
 
     local stroke = Instance.new("UIStroke")
-    stroke.Color = Color3.fromRGB(80, 120, 255)
-    stroke.Thickness = 1.2
+    stroke.Color = Color3.fromRGB(90, 130, 255)
+    stroke.Thickness = 1.4
     stroke.Parent = floatBtn
 
-    local dragging, dragStart, startPos
+    -- Robust drag handler for floating button
+    local dragging = false
+    local dragStart, startPos
+
     floatBtn.InputBegan:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
             dragging = true
             dragStart = input.Position
             startPos = floatBtn.Position
-            input.Changed:Connect(function()
-                if input.UserInputState == Enum.UserInputState.End then dragging = false end
-            end)
         end
     end)
-    floatBtn.InputChanged:Connect(function(input)
+
+    local dragEndConn = UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+        end
+    end)
+    table.insert(HubConnections, dragEndConn)
+
+    local dragMoveConn = UserInputService.InputChanged:Connect(function(input)
         if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
             local delta = input.Position - dragStart
             floatBtn.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
         end
     end)
+    table.insert(HubConnections, dragMoveConn)
 
     floatBtn.MouseButton1Click:Connect(toggleCallback)
-    table.insert(HubConnections, {Disconnect = function() pcall(function() floatGui:Destroy() end) end})
 end
 
+-- Primary Native UI Builder
 local function buildNativeUI()
-    addLog("info", "Loading Fallback Native ScreenGui...")
+    addLog("info", "Constructing Native Hub GUI v5.0...")
+
+    if GlobalScreenGui then GlobalScreenGui:Destroy() end
 
     local screenGui = Instance.new("ScreenGui")
     screenGui.Name = "NeedleHubNative"
@@ -1075,10 +1206,10 @@ local function buildNativeUI()
 
     local mainFrame = Instance.new("Frame")
     mainFrame.Name = "MainFrame"
-    mainFrame.Size = UDim2.fromOffset(560, 420)
+    mainFrame.Size = UDim2.fromOffset(590, 440)
     mainFrame.Position = UDim2.fromScale(0.5, 0.5)
     mainFrame.AnchorPoint = Vector2.new(0.5, 0.5)
-    mainFrame.BackgroundColor3 = Color3.fromRGB(18, 18, 24)
+    mainFrame.BackgroundColor3 = Color3.fromRGB(18, 18, 26)
     mainFrame.BorderSizePixel = 0
     mainFrame.ClipsDescendants = true
     mainFrame.Parent = screenGui
@@ -1088,15 +1219,15 @@ local function buildNativeUI()
     corner.Parent = mainFrame
 
     local stroke = Instance.new("UIStroke")
-    stroke.Color = Color3.fromRGB(45, 45, 60)
+    stroke.Color = Color3.fromRGB(50, 55, 75)
     stroke.Thickness = 1.5
     stroke.Parent = mainFrame
 
-    -- Title Bar with Dragging Logic
+    -- Title Bar
     local titleBar = Instance.new("Frame")
     titleBar.Name = "TitleBar"
-    titleBar.Size = UDim2.new(1, 0, 0, 36)
-    titleBar.BackgroundColor3 = Color3.fromRGB(24, 24, 32)
+    titleBar.Size = UDim2.new(1, 0, 0, 38)
+    titleBar.BackgroundColor3 = Color3.fromRGB(26, 28, 38)
     titleBar.BorderSizePixel = 0
     titleBar.Parent = mainFrame
 
@@ -1104,55 +1235,69 @@ local function buildNativeUI()
     titleCorner.CornerRadius = UDim.new(0, 10)
     titleCorner.Parent = titleBar
 
-    local dragging, dragStart, startPos
+    -- Global, non-slipping Dragging Implementation
+    local isDraggingMain = false
+    local dragStartPos, frameStartPos
+
     titleBar.InputBegan:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-            dragging = true
-            dragStart = input.Position
-            startPos = mainFrame.Position
-            input.Changed:Connect(function()
-                if input.UserInputState == Enum.UserInputState.End then dragging = false end
-            end)
-        end
-    end)
-    titleBar.InputChanged:Connect(function(input)
-        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
-            local delta = input.Position - dragStart
-            mainFrame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+            isDraggingMain = true
+            dragStartPos = input.Position
+            frameStartPos = mainFrame.Position
         end
     end)
 
+    local mainDragEndConn = UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            isDraggingMain = false
+        end
+    end)
+    table.insert(HubConnections, mainDragEndConn)
+
+    local mainDragMoveConn = UserInputService.InputChanged:Connect(function(input)
+        if isDraggingMain and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            local delta = input.Position - dragStartPos
+            mainFrame.Position = UDim2.new(
+                frameStartPos.X.Scale,
+                frameStartPos.X.Offset + delta.X,
+                frameStartPos.Y.Scale,
+                frameStartPos.Y.Offset + delta.Y
+            )
+        end
+    end)
+    table.insert(HubConnections, mainDragMoveConn)
+
     local titleLabel = Instance.new("TextLabel")
-    titleLabel.Size = UDim2.new(1, -90, 1, 0)
+    titleLabel.Size = UDim2.new(1, -110, 1, 0)
     titleLabel.Position = UDim2.fromOffset(14, 0)
     titleLabel.BackgroundTransparency = 1
-    titleLabel.Text = "Search For The Needle - Hub v4.1 [" .. GAME_MODE_NAME .. "]"
-    titleLabel.TextColor3 = Color3.fromRGB(230, 230, 240)
+    titleLabel.Text = "Search For The Needle - Hub v5.0 [" .. GAME_MODE_NAME .. "]"
+    titleLabel.TextColor3 = Color3.fromRGB(240, 240, 255)
     titleLabel.Font = Enum.Font.GothamBold
     titleLabel.TextSize = 13
     titleLabel.TextXAlignment = Enum.TextXAlignment.Left
     titleLabel.Parent = titleBar
 
-    -- Minimize Button (-)
+    -- Minimize Button (_)
     local isMinimized = false
     local minBtn = Instance.new("TextButton")
     minBtn.Size = UDim2.fromOffset(26, 26)
-    minBtn.Position = UDim2.new(1, -62, 0.5, -13)
-    minBtn.BackgroundColor3 = Color3.fromRGB(50, 50, 65)
-    minBtn.Text = "-"
+    minBtn.Position = UDim2.new(1, -66, 0.5, -13)
+    minBtn.BackgroundColor3 = Color3.fromRGB(45, 48, 65)
+    minBtn.Text = "_"
     minBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
     minBtn.Font = Enum.Font.GothamBold
-    minBtn.TextSize = 14
+    minBtn.TextSize = 13
     minBtn.Parent = titleBar
     local minCorner = Instance.new("UICorner")
     minCorner.CornerRadius = UDim.new(0, 6)
     minCorner.Parent = minBtn
 
-    -- Close Button (X)
+    -- Close / Unload Button (X)
     local closeBtn = Instance.new("TextButton")
     closeBtn.Size = UDim2.fromOffset(26, 26)
-    closeBtn.Position = UDim2.new(1, -30, 0.5, -13)
-    closeBtn.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
+    closeBtn.Position = UDim2.new(1, -34, 0.5, -13)
+    closeBtn.BackgroundColor3 = Color3.fromRGB(180, 45, 45)
     closeBtn.Text = "X"
     closeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
     closeBtn.Font = Enum.Font.GothamBold
@@ -1162,217 +1307,329 @@ local function buildNativeUI()
     closeCorner.CornerRadius = UDim.new(0, 6)
     closeCorner.Parent = closeBtn
 
-    -- Sidebar
+    closeBtn.MouseButton1Click:Connect(function()
+        unloadHub()
+    end)
+
+    -- Container for Tabs & Content
+    local bodyContainer = Instance.new("Frame")
+    bodyContainer.Name = "BodyContainer"
+    bodyContainer.Size = UDim2.new(1, 0, 1, -38)
+    bodyContainer.Position = UDim2.fromOffset(0, 38)
+    bodyContainer.BackgroundTransparency = 1
+    bodyContainer.Parent = mainFrame
+
+    minBtn.MouseButton1Click:Connect(function()
+        isMinimized = not isMinimized
+        minBtn.Text = isMinimized and "+" or "_"
+        if isMinimized then
+            mainFrame.Size = UDim2.fromOffset(590, 38)
+            bodyContainer.Visible = false
+        else
+            mainFrame.Size = UDim2.fromOffset(590, 440)
+            bodyContainer.Visible = true
+        end
+    end)
+
+    -- Sidebar for Tabs
     local sidebar = Instance.new("Frame")
     sidebar.Name = "Sidebar"
-    sidebar.Size = UDim2.new(0, 130, 1, -36)
-    sidebar.Position = UDim2.fromOffset(0, 36)
-    sidebar.BackgroundColor3 = Color3.fromRGB(22, 22, 28)
+    sidebar.Size = UDim2.new(0, 140, 1, 0)
+    sidebar.BackgroundColor3 = Color3.fromRGB(22, 22, 30)
     sidebar.BorderSizePixel = 0
-    sidebar.Parent = mainFrame
+    sidebar.Parent = bodyContainer
 
-    local sideLayout = Instance.new("UIListLayout")
-    sideLayout.Padding = UDim.new(0, 4)
-    sideLayout.SortOrder = Enum.SortOrder.LayoutOrder
-    sideLayout.Parent = sidebar
+    local sidebarLayout = Instance.new("UIListLayout")
+    sidebarLayout.Padding = UDim.new(0, 4)
+    sidebarLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+    sidebarLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    sidebarLayout.Parent = sidebar
 
-    local sidePadding = Instance.new("UIPadding")
-    sidePadding.PaddingTop = UDim.new(0, 8)
-    sidePadding.PaddingLeft = UDim.new(0, 8)
-    sidePadding.PaddingRight = UDim.new(0, 8)
-    sidePadding.Parent = sidebar
+    local sidebarPadding = Instance.new("UIPadding")
+    sidebarPadding.PaddingTop = UDim.new(0, 10)
+    sidebarPadding.Parent = sidebar
 
     -- Content Area
     local contentArea = Instance.new("Frame")
     contentArea.Name = "ContentArea"
-    contentArea.Size = UDim2.new(1, -130, 1, -36)
-    contentArea.Position = UDim2.fromOffset(130, 36)
+    contentArea.Size = UDim2.new(1, -140, 1, 0)
+    contentArea.Position = UDim2.fromOffset(140, 0)
     contentArea.BackgroundTransparency = 1
-    contentArea.Parent = mainFrame
+    contentArea.Parent = bodyContainer
 
-    minBtn.MouseButton1Click:Connect(function()
-        isMinimized = not isMinimized
-        minBtn.Text = isMinimized and "+" or "-"
-        if isMinimized then
-            mainFrame.Size = UDim2.fromOffset(560, 36)
-            sidebar.Visible = false
-            contentArea.Visible = false
-        else
-            mainFrame.Size = UDim2.fromOffset(560, 420)
-            sidebar.Visible = true
-            contentArea.Visible = true
+    local tabFrames = {}
+    local tabButtons = {}
+
+    local function selectTab(tabName)
+        for name, frame in pairs(tabFrames) do
+            frame.Visible = (name == tabName)
         end
-    end)
-
-    closeBtn.MouseButton1Click:Connect(function()
-        screenGui.Enabled = not screenGui.Enabled
-    end)
-
-    createFloatingToggleButton(function()
-        screenGui.Enabled = not screenGui.Enabled
-    end)
-
-    local tabContainers = {}
-
-    local function createTabContent(name)
-        local sf = Instance.new("ScrollingFrame")
-        sf.Name = name .. "Tab"
-        sf.Size = UDim2.fromScale(1, 1)
-        sf.BackgroundTransparency = 1
-        sf.BorderSizePixel = 0
-        sf.CanvasSize = UDim2.fromOffset(0, 700)
-        sf.ScrollBarThickness = 4
-        sf.Visible = false
-        sf.Parent = contentArea
-
-        local layout = Instance.new("UIListLayout")
-        layout.Padding = UDim.new(0, 6)
-        layout.SortOrder = Enum.SortOrder.LayoutOrder
-        layout.Parent = sf
-
-        local pad = Instance.new("UIPadding")
-        pad.PaddingTop = UDim.new(0, 10)
-        pad.PaddingLeft = UDim.new(0, 10)
-        pad.PaddingRight = UDim.new(0, 10)
-        pad.Parent = sf
-
-        tabContainers[name] = sf
-        return sf
-    end
-
-    local tabs = {"AutoFarm", "Player", "Teleport", "LobbyAuto", "ESP", "Console", "Settings"}
-    for _, tName in ipairs(tabs) do createTabContent(tName) end
-
-    local function switchTab(tabName)
-        for name, container in pairs(tabContainers) do
-            container.Visible = (name == tabName)
+        for name, btn in pairs(tabButtons) do
+            if name == tabName then
+                btn.BackgroundColor3 = Color3.fromRGB(60, 75, 140)
+                btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+            else
+                btn.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
+                btn.TextColor3 = Color3.fromRGB(180, 180, 200)
+            end
         end
     end
 
-    for idx, tName in ipairs(tabs) do
+    local function createTab(tabName)
         local btn = Instance.new("TextButton")
-        btn.Size = UDim2.new(1, 0, 0, 28)
+        btn.Size = UDim2.new(0.9, 0, 0, 32)
         btn.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
-        btn.Text = tName
-        btn.TextColor3 = Color3.fromRGB(200, 200, 220)
-        btn.Font = Enum.Font.GothamMedium
-        btn.TextSize = 11
-        btn.LayoutOrder = idx
+        btn.Text = tabName
+        btn.TextColor3 = Color3.fromRGB(180, 180, 200)
+        btn.Font = Enum.Font.GothamBold
+        btn.TextSize = 12
         btn.Parent = sidebar
-        local bCorner = Instance.new("UICorner")
-        bCorner.CornerRadius = UDim.new(0, 6)
-        bCorner.Parent = btn
-        btn.MouseButton1Click:Connect(function() switchTab(tName) end)
+        local btnCorner = Instance.new("UICorner")
+        btnCorner.CornerRadius = UDim.new(0, 6)
+        btnCorner.Parent = btn
+
+        local scroll = Instance.new("ScrollingFrame")
+        scroll.Name = "TabContent_" .. tabName
+        scroll.Size = UDim2.new(1, -16, 1, -16)
+        scroll.Position = UDim2.fromOffset(8, 8)
+        scroll.BackgroundTransparency = 1
+        scroll.BorderSizePixel = 0
+        scroll.ScrollBarThickness = 5
+        scroll.ScrollBarImageColor3 = Color3.fromRGB(70, 70, 90)
+        scroll.Visible = false
+        scroll.Parent = contentArea
+
+        local list = Instance.new("UIListLayout")
+        list.Padding = UDim.new(0, 8)
+        list.HorizontalAlignment = Enum.HorizontalAlignment.Center
+        list.SortOrder = Enum.SortOrder.LayoutOrder
+        list.Parent = scroll
+
+        list:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+            scroll.CanvasSize = UDim2.fromOffset(0, list.AbsoluteContentSize.Y + 20)
+        end)
+
+        tabFrames[tabName] = scroll
+        tabButtons[tabName] = btn
+
+        btn.MouseButton1Click:Connect(function()
+            selectTab(tabName)
+        end)
+
+        return scroll
     end
 
+    -- UI Element Builders
     local function addNativeToggle(parent, title, default, callback)
         local frame = Instance.new("Frame")
-        frame.Size = UDim2.new(1, 0, 0, 34)
-        frame.BackgroundColor3 = Color3.fromRGB(28, 28, 36)
+        frame.Size = UDim2.new(0.96, 0, 0, 36)
+        frame.BackgroundColor3 = Color3.fromRGB(26, 26, 36)
         frame.BorderSizePixel = 0
         frame.Parent = parent
+        local c = Instance.new("UICorner") c.CornerRadius = UDim.new(0, 6) c.Parent = frame
 
-        local fCorner = Instance.new("UICorner")
-        fCorner.CornerRadius = UDim.new(0, 6)
-        fCorner.Parent = frame
+        local lbl = Instance.new("TextLabel")
+        lbl.Size = UDim2.new(1, -60, 1, 0)
+        lbl.Position = UDim2.fromOffset(10, 0)
+        lbl.BackgroundTransparency = 1
+        lbl.Text = title
+        lbl.TextColor3 = Color3.fromRGB(230, 230, 240)
+        lbl.Font = Enum.Font.GothamMedium
+        lbl.TextSize = 12
+        lbl.TextXAlignment = Enum.TextXAlignment.Left
+        lbl.Parent = frame
 
-        local label = Instance.new("TextLabel")
-        label.Size = UDim2.new(1, -60, 1, 0)
-        label.Position = UDim2.fromOffset(10, 0)
-        label.BackgroundTransparency = 1
-        label.Text = title
-        label.TextColor3 = Color3.fromRGB(220, 220, 230)
-        label.Font = Enum.Font.Gotham
-        label.TextSize = 11
-        label.TextXAlignment = Enum.TextXAlignment.Left
-        label.Parent = frame
+        local toggleBtn = Instance.new("TextButton")
+        toggleBtn.Size = UDim2.fromOffset(42, 22)
+        toggleBtn.Position = UDim2.new(1, -52, 0.5, -11)
+        toggleBtn.BackgroundColor3 = default and Color3.fromRGB(50, 180, 80) or Color3.fromRGB(60, 60, 75)
+        toggleBtn.Text = default and "ON" or "OFF"
+        toggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+        toggleBtn.Font = Enum.Font.GothamBold
+        toggleBtn.TextSize = 10
+        toggleBtn.Parent = frame
+        local tc = Instance.new("UICorner") tc.CornerRadius = UDim.new(0, 6) tc.Parent = toggleBtn
 
-        local tBtn = Instance.new("TextButton")
-        tBtn.Size = UDim2.fromOffset(42, 22)
-        tBtn.Position = UDim2.new(1, -50, 0.5, -11)
-        tBtn.BackgroundColor3 = default and Color3.fromRGB(50, 180, 80) or Color3.fromRGB(60, 60, 75)
-        tBtn.Text = default and "ON" or "OFF"
-        tBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-        tBtn.Font = Enum.Font.GothamBold
-        tBtn.TextSize = 10
-        tBtn.Parent = frame
-        local tbCorner = Instance.new("UICorner")
-        tbCorner.CornerRadius = UDim.new(0, 6)
-        tbCorner.Parent = tBtn
-
-        local state = default
-        tBtn.MouseButton1Click:Connect(function()
-            state = not state
-            tBtn.Text = state and "ON" or "OFF"
-            tBtn.BackgroundColor3 = state and Color3.fromRGB(50, 180, 80) or Color3.fromRGB(60, 60, 75)
-            callback(state)
+        local currentVal = default
+        toggleBtn.MouseButton1Click:Connect(function()
+            currentVal = not currentVal
+            toggleBtn.Text = currentVal and "ON" or "OFF"
+            toggleBtn.BackgroundColor3 = currentVal and Color3.fromRGB(50, 180, 80) or Color3.fromRGB(60, 60, 75)
+            callback(currentVal)
         end)
     end
 
     local function addNativeButton(parent, title, callback)
         local btn = Instance.new("TextButton")
-        btn.Size = UDim2.new(1, 0, 0, 30)
-        btn.BackgroundColor3 = Color3.fromRGB(40, 40, 55)
+        btn.Size = UDim2.new(0.96, 0, 0, 34)
+        btn.BackgroundColor3 = Color3.fromRGB(40, 50, 85)
         btn.Text = title
-        btn.TextColor3 = Color3.fromRGB(240, 240, 255)
+        btn.TextColor3 = Color3.fromRGB(255, 255, 255)
         btn.Font = Enum.Font.GothamBold
-        btn.TextSize = 11
+        btn.TextSize = 12
         btn.Parent = parent
-        local bCorner = Instance.new("UICorner")
-        bCorner.CornerRadius = UDim.new(0, 6)
-        bCorner.Parent = btn
+        local c = Instance.new("UICorner") c.CornerRadius = UDim.new(0, 6) c.Parent = btn
         btn.MouseButton1Click:Connect(callback)
     end
 
-    -- Tab 1: AutoFarm
-    local farmTab = tabContainers.AutoFarm
-    addNativeToggle(farmTab, "Auto Collect Hay (Batch Multi-Grab)", HubState.AutoFarmHay, function(val)
+    local function addNativeSlider(parent, title, min, max, default, callback)
+        local frame = Instance.new("Frame")
+        frame.Size = UDim2.new(0.96, 0, 0, 50)
+        frame.BackgroundColor3 = Color3.fromRGB(26, 26, 36)
+        frame.BorderSizePixel = 0
+        frame.Parent = parent
+        local c = Instance.new("UICorner") c.CornerRadius = UDim.new(0, 6) c.Parent = frame
+
+        local lbl = Instance.new("TextLabel")
+        lbl.Size = UDim2.new(1, -70, 0, 22)
+        lbl.Position = UDim2.fromOffset(10, 4)
+        lbl.BackgroundTransparency = 1
+        lbl.Text = title
+        lbl.TextColor3 = Color3.fromRGB(230, 230, 240)
+        lbl.Font = Enum.Font.GothamMedium
+        lbl.TextSize = 12
+        lbl.TextXAlignment = Enum.TextXAlignment.Left
+        lbl.Parent = frame
+
+        local valLbl = Instance.new("TextLabel")
+        valLbl.Size = UDim2.fromOffset(50, 22)
+        valLbl.Position = UDim2.new(1, -60, 0, 4)
+        valLbl.BackgroundTransparency = 1
+        valLbl.Text = tostring(default)
+        valLbl.TextColor3 = Color3.fromRGB(150, 190, 255)
+        valLbl.Font = Enum.Font.GothamBold
+        valLbl.TextSize = 12
+        valLbl.TextXAlignment = Enum.TextXAlignment.Right
+        valLbl.Parent = frame
+
+        local barBg = Instance.new("Frame")
+        barBg.Size = UDim2.new(1, -20, 0, 8)
+        barBg.Position = UDim2.fromOffset(10, 32)
+        barBg.BackgroundColor3 = Color3.fromRGB(45, 45, 60)
+        barBg.BorderSizePixel = 0
+        barBg.Parent = frame
+        local bc = Instance.new("UICorner") bc.CornerRadius = UDim.new(0, 4) bc.Parent = barBg
+
+        local fill = Instance.new("Frame")
+        local startFrac = math.clamp((default - min) / (max - min), 0, 1)
+        fill.Size = UDim2.fromScale(startFrac, 1)
+        fill.BackgroundColor3 = Color3.fromRGB(80, 130, 255)
+        fill.BorderSizePixel = 0
+        fill.Parent = barBg
+        local fc = Instance.new("UICorner") fc.CornerRadius = UDim.new(0, 4) fc.Parent = fill
+
+        local isDraggingSlider = false
+        local function updateVal(input)
+            local frac = math.clamp((input.Position.X - barBg.AbsolutePosition.X) / barBg.AbsoluteSize.X, 0, 1)
+            local result = math.floor(min + (max - min) * frac)
+            fill.Size = UDim2.fromScale(frac, 1)
+            valLbl.Text = tostring(result)
+            callback(result)
+        end
+
+        barBg.InputBegan:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+                isDraggingSlider = true
+                updateVal(input)
+            end
+        end)
+        UserInputService.InputEnded:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+                isDraggingSlider = false
+            end
+        end)
+        UserInputService.InputChanged:Connect(function(input)
+            if isDraggingSlider and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+                updateVal(input)
+            end
+        end)
+    end
+
+    -- Construct Tabs
+    local farmTab = createTab("Auto Farm")
+    local playerTab = createTab("Player")
+    local teleTab = createTab("Teleport")
+    local espTab = createTab("ESP")
+    local lobbyTab = createTab("Lobby")
+    local consoleTab = createTab("Console")
+    local setTab = createTab("Settings")
+
+    -- Tab 1: Auto Farm
+    addNativeToggle(farmTab, "Auto Collect Hay (Multi-Grab)", HubState.AutoFarmHay, function(val)
         HubState.AutoFarmHay = val
         addLog("info", "Auto Farm Hay: " .. tostring(val))
     end)
-    addNativeToggle(farmTab, "Prioritize RGB / Rare Straws (More Cash)", HubState.PrioritizeRGB, function(val)
+    addNativeToggle(farmTab, "Prioritize RGB / Rare Straws (10x Value)", HubState.PrioritizeRGB, function(val)
         HubState.PrioritizeRGB = val
-        addLog("info", "RGB Priority: " .. tostring(val))
+        addLog("info", "Prioritize RGB: " .. tostring(val))
     end)
-    addNativeToggle(farmTab, "Auto Sell (Cycles to Cow when Full)", HubState.AutoSell, function(val)
+    addNativeToggle(farmTab, "Auto Collect Gems", HubState.AutoCollectGems, function(val)
+        HubState.AutoCollectGems = val
+        addLog("info", "Auto Collect Gems: " .. tostring(val))
+    end)
+    addNativeToggle(farmTab, "Auto Sell when Bag is Full", HubState.AutoSell, function(val)
         HubState.AutoSell = val
+        addLog("info", "Auto Sell: " .. tostring(val))
     end)
-    addNativeToggle(farmTab, "Auto Win Needle (TP & Hand-In)", HubState.AutoWinNeedle, function(val)
+    addNativeToggle(farmTab, "Auto-Win Needle (Farmer Hand-In)", HubState.AutoWinNeedle, function(val)
         HubState.AutoWinNeedle = val
-        addLog("info", "Auto Win Needle: " .. tostring(val))
+        addLog("info", "Auto-Win Needle: " .. tostring(val))
     end)
-    addNativeToggle(farmTab, "Auto Buy Upgrades (Bag & Take)", HubState.AutoBuyUpgrades, function(val)
+    addNativeToggle(farmTab, "Auto Deploy Drone", HubState.AutoDeployDrone, function(val)
+        HubState.AutoDeployDrone = val
+    end)
+    addNativeToggle(farmTab, "Auto Buy Upgrades", HubState.AutoBuyUpgrades, function(val)
         HubState.AutoBuyUpgrades = val
     end)
-    addNativeButton(farmTab, "Instant Sell Hay Now (Teleport & Sell)", function()
-        task.spawn(function()
-            local hrp = getHRP()
-            if hrp then
-                local backPos = hrp.CFrame
-                teleportTo(Landmarks.SellCow)
-                task.wait(0.25)
-                if Remotes.SellHay then Remotes.SellHay:FireServer() end
-                task.wait(0.3)
-                teleportTo(backPos)
-            end
-        end)
+    addNativeButton(farmTab, "Sell Hay Now (Instant Teleport)", function()
+        teleportTo(Landmarks.SellCow)
+        task.wait(0.2)
+        if Remotes.SellHay then Remotes.SellHay:FireServer() end
+        addLog("info", "Executed instant sell.")
     end)
 
     -- Tab 2: Player
-    local playerTab = tabContainers.Player
-    addNativeButton(playerTab, "Snap to 3rd Person View (18 Studs)", function()
-        forceSnap3rdPerson(18)
+    addNativeToggle(playerTab, "Unlock Camera (3rd Person)", HubState.UnlockCamera, function(val)
+        HubState.UnlockCamera = val
+        applyCameraAndMouse()
     end)
-    addNativeToggle(playerTab, "Free Mouse [LeftAlt / Insert]", HubState.FreeMouse, function(val)
+    addNativeToggle(playerTab, "Free Mouse (Hold RMB to Look)", HubState.FreeMouse, function(val)
         HubState.FreeMouse = val
+        applyCameraAndMouse()
     end)
-    addNativeToggle(playerTab, "Speed Modifier (50)", HubState.WalkSpeedEnabled, function(val)
-        HubState.WalkSpeed = 50
+    addNativeButton(playerTab, "Snap 3rd Person Camera (Zoom Out)", function()
+        forceSnap3rdPerson(22)
+    end)
+    addNativeSlider(playerTab, "Camera Zoom Distance", 5, 80, HubState.CameraZoomDistance, function(val)
+        HubState.CameraZoomDistance = val
+        forceSnap3rdPerson(val)
+    end)
+    addNativeToggle(playerTab, "Custom WalkSpeed", HubState.WalkSpeedEnabled, function(val)
         HubState.WalkSpeedEnabled = val
+        if not val then
+            local hum = getHumanoid()
+            if hum then hum.WalkSpeed = 16 end
+        end
+    end)
+    addNativeSlider(playerTab, "WalkSpeed Value", 16, 150, HubState.WalkSpeed, function(val)
+        HubState.WalkSpeed = val
+    end)
+    addNativeToggle(playerTab, "Custom JumpPower", HubState.JumpHeightEnabled, function(val)
+        HubState.JumpHeightEnabled = val
+        if not val then
+            local hum = getHumanoid()
+            if hum then hum.JumpHeight = 7.2 end
+        end
+    end)
+    addNativeSlider(playerTab, "JumpHeight Value", 7, 100, math.floor(HubState.JumpHeight), function(val)
+        HubState.JumpHeight = val
     end)
     addNativeToggle(playerTab, "Fly (WASD + Space/Shift)", HubState.FlyEnabled, function(val)
         HubState.FlyEnabled = val
         toggleFly(val)
+    end)
+    addNativeSlider(playerTab, "Fly Speed", 20, 250, HubState.FlySpeed, function(val)
+        HubState.FlySpeed = val
     end)
     addNativeToggle(playerTab, "Noclip", HubState.NoclipEnabled, function(val)
         HubState.NoclipEnabled = val
@@ -1381,326 +1638,96 @@ local function buildNativeUI()
         HubState.InfiniteJump = val
     end)
 
-    -- Tab 3: Teleports
-    local tpTab = tabContainers.Teleport
-    addNativeButton(tpTab, "Teleport to Hayfield", function() teleportTo(Landmarks.HayCenter) end)
-    addNativeButton(tpTab, "Teleport to Sell Cow", function() teleportTo(Landmarks.SellCow) end)
-    addNativeButton(tpTab, "Teleport to Farmer NPC", function() teleportTo(Landmarks.FarmerNPC) end)
-    addNativeButton(tpTab, "Teleport to The Needle", function()
-        if Landmarks.NeedleCFrame then teleportTo(Landmarks.NeedleCFrame)
-        else addLog("warn", "Needle not found yet") end
+    -- Tab 3: Teleport
+    addNativeButton(teleTab, "Teleport to Hay Mound", function()
+        teleportTo(Landmarks.HayCenter)
+        addLog("info", "Teleported to Hay Mound")
     end)
-
-    -- Tab 4: Lobby Automation
-    local autoTab = tabContainers.LobbyAuto
-    addNativeButton(autoTab, "Redeem All Codes (Lobby Only)", function() redeemAllCodes() end)
-    addNativeButton(autoTab, "Equip Cow Pet (120 Cap)", function()
-        if Remotes.EquipPet then Remotes.EquipPet:InvokeServer("Cow") end
+    addNativeButton(teleTab, "Teleport to Sell Cow", function()
+        teleportTo(Landmarks.SellCow)
+        addLog("info", "Teleported to Sell Cow")
     end)
-    addNativeButton(autoTab, "Open Alien Chest", function()
-        if Remotes.OpenChest then Remotes.OpenChest:InvokeServer() end
+    addNativeButton(teleTab, "Teleport to Farmer NPC", function()
+        teleportTo(Landmarks.FarmerNPC)
+        addLog("info", "Teleported to Farmer NPC")
     end)
-    addNativeToggle(autoTab, "Auto Roll Ultimate Farmer", HubState.AutoRollClass, function(val)
-        HubState.AutoRollClass = val
-        if val then autoRollClassLoop() end
-    end)
-
-    -- Tab 5: ESP
-    local espTab = tabContainers.ESP
-    addNativeToggle(espTab, "RGB Straws ESP (Magenta)", HubState.RgbESP, function(val) HubState.RgbESP = val end)
-    addNativeToggle(espTab, "Needle ESP (Yellow)", HubState.NeedleESP, function(val) HubState.NeedleESP = val end)
-    addNativeToggle(espTab, "Sell Cow ESP (Cyan)", HubState.SellESP, function(val) HubState.SellESP = val end)
-    addNativeToggle(espTab, "Gem ESP (Green)", HubState.GemESP, function(val) HubState.GemESP = val end)
-    addNativeToggle(espTab, "Player ESP", HubState.PlayerESP, function(val) HubState.PlayerESP = val end)
-
-    -- Tab 6: Console
-    local conTab = tabContainers.Console
-    local logBox = Instance.new("TextLabel")
-    logBox.Size = UDim2.new(1, 0, 0, 240)
-    logBox.BackgroundColor3 = Color3.fromRGB(12, 12, 16)
-    logBox.TextColor3 = Color3.fromRGB(160, 255, 160)
-    logBox.Font = Enum.Font.Code
-    logBox.TextSize = 11
-    logBox.TextXAlignment = Enum.TextXAlignment.Left
-    logBox.TextYAlignment = Enum.TextYAlignment.Top
-    logBox.TextWrapped = true
-    logBox.Parent = conTab
-    local lbCorner = Instance.new("UICorner")
-    lbCorner.CornerRadius = UDim.new(0, 6)
-    lbCorner.Parent = logBox
-
-    task.spawn(function()
-        while IsHubLoaded do
-            task.wait(1)
-            local recent = {}
-            local count = #LogEntries
-            local startIndex = math.max(1, count - 14)
-            for i = startIndex, count do table.insert(recent, LogEntries[i]) end
-            logBox.Text = table.concat(recent, "\n")
+    addNativeButton(teleTab, "Teleport to Needle (If Found)", function()
+        if Landmarks.NeedleCFrame then
+            teleportTo(Landmarks.NeedleCFrame)
+            addLog("info", "Teleported to Needle CFrame")
+        else
+            addLog("warn", "Needle location is not yet known.")
         end
     end)
 
-    addNativeButton(conTab, "Clear Event Log", function()
-        table.clear(LogEntries)
-        logBox.Text = ""
+    -- Tab 4: ESP
+    addNativeToggle(espTab, "Needle ESP", HubState.NeedleESP, function(val) HubState.NeedleESP = val end)
+    addNativeToggle(espTab, "Rainbow / RGB Straw ESP", HubState.RgbESP, function(val) HubState.RgbESP = val end)
+    addNativeToggle(espTab, "Gems ESP", HubState.GemESP, function(val) HubState.GemESP = val end)
+    addNativeToggle(espTab, "Sell Cow ESP", HubState.SellESP, function(val) HubState.SellESP = val end)
+    addNativeToggle(espTab, "Player ESP", HubState.PlayerESP, function(val) HubState.PlayerESP = val end)
+
+    -- Tab 5: Lobby
+    addNativeButton(lobbyTab, "Redeem All Known Codes", function()
+        redeemAllCodes("")
+    end)
+    addNativeButton(lobbyTab, "Equip Cow Pet (Lobby)", function()
+        if Remotes.EquipPet then
+            Remotes.EquipPet:InvokeServer("Cow")
+            addLog("info", "Equipped Cow Pet")
+        end
+    end)
+    addNativeButton(lobbyTab, "Open All Chests", function()
+        if Remotes.OpenChest then
+            for i = 1, 10 do
+                pcall(function() Remotes.OpenChest:InvokeServer() end)
+                task.wait(0.2)
+            end
+            addLog("info", "Batch opened chests.")
+        end
     end)
 
+    -- Tab 6: Console
+    local consoleBox = Instance.new("TextBox")
+    consoleBox.Size = UDim2.new(0.96, 0, 0, 300)
+    consoleBox.BackgroundColor3 = Color3.fromRGB(12, 12, 18)
+    consoleBox.TextColor3 = Color3.fromRGB(190, 240, 190)
+    consoleBox.Font = Enum.Font.Code
+    consoleBox.TextSize = 11
+    consoleBox.ClearTextOnFocus = false
+    consoleBox.TextEditable = false
+    consoleBox.TextXAlignment = Enum.TextXAlignment.Left
+    consoleBox.TextYAlignment = Enum.TextYAlignment.Top
+    consoleBox.MultiLine = true
+    consoleBox.Text = table.concat(LogEntries, "\n")
+    consoleBox.Parent = consoleTab
+    local cbCorner = Instance.new("UICorner") cbCorner.CornerRadius = UDim.new(0, 6) cbCorner.Parent = consoleBox
+
+    local consoleRefreshThread = task.spawn(function()
+        while IsHubLoaded do
+            task.wait(1)
+            pcall(function()
+                consoleBox.Text = table.concat(LogEntries, "\n")
+            end)
+        end
+    end)
+    table.insert(HubThreads, consoleRefreshThread)
+
     -- Tab 7: Settings & Unload
-    local setTab = tabContainers.Settings
-    addNativeButton(setTab, "UNLOAD / DESTROY HUB", function()
+    addNativeButton(setTab, "UNLOAD / DESTROY SCRIPT", function()
         unloadHub()
     end)
 
-    switchTab("AutoFarm")
-    addLog("info", "Native GUI loaded successfully")
-end
+    -- Select Default Tab
+    selectTab("Auto Farm")
 
--- Try loading Fluent UI first
-local function initializeFluentUI()
-    local Fluent = nil
-    local loadSuccess, _ = pcall(function()
-        Fluent = loadstring(game:HttpGet("https://raw.githubusercontent.com/dawid-scripts/Fluent/master/Fluent.luau"))()
-    end)
-
-    if not loadSuccess or not Fluent then
-        addLog("warn", "Fluent UI failed to load. Initiating Native GUI.")
-        buildNativeUI()
-        return
-    end
-
-    local Window = Fluent:CreateWindow({
-        Title = "Search For The Needle",
-        SubTitle = "Hub v4.1 [" .. GAME_MODE_NAME .. "]",
-        TabWidth = 160,
-        Size = UDim2.fromOffset(580, 460),
-        Acrylic = false,
-        Theme = "Dark",
-        MinimizeKey = Enum.KeyCode.RightControl
-    })
-
+    -- Setup Floating Button to toggle main frame visibility
     createFloatingToggleButton(function()
-        pcall(function()
-            if Window.Root then Window.Root.Visible = not Window.Root.Visible end
-        end)
+        mainFrame.Visible = not mainFrame.Visible
     end)
-
-    -- TAB 1: Auto Farm
-    local TabFarm = Window:AddTab({Title = "Auto Farm", Icon = "bot"})
-
-    TabFarm:AddToggle("AutoFarmHay", {Title = "Auto Collect Hay (Batch Multi-Grab)", Default = HubState.AutoFarmHay}):OnChanged(function(val)
-        HubState.AutoFarmHay = val
-        addLog("info", "Auto Farm Hay: " .. tostring(val))
-    end)
-
-    TabFarm:AddToggle("PrioritizeRGB", {Title = "Prioritize RGB / Rare Straws (More Cash)", Default = true}):OnChanged(function(val)
-        HubState.PrioritizeRGB = val
-        addLog("info", "Prioritize RGB: " .. tostring(val))
-    end)
-
-    TabFarm:AddSlider("BatchSlider", {
-        Title = "Strands per Batch (Speed Multiplier)",
-        Default = 15,
-        Min = 5,
-        Max = 35,
-        Rounding = 0,
-        Callback = function(val)
-            HubState.BatchSize = val
-            addLog("info", "Batch Size set to: " .. val)
-        end
-    })
-
-    TabFarm:AddToggle("AutoSell", {Title = "Auto Sell (Cycles to Cow when Full)", Default = HubState.AutoSell}):OnChanged(function(val)
-        HubState.AutoSell = val
-    end)
-
-    TabFarm:AddToggle("AutoWinNeedle", {Title = "Auto Win Needle (TP & Hand-In)", Default = true}):OnChanged(function(val)
-        HubState.AutoWinNeedle = val
-        addLog("info", "Auto Win Needle: " .. tostring(val))
-    end)
-
-    TabFarm:AddToggle("AutoBuyUpgrades", {Title = "Auto Buy Upgrades (Bag & Take)", Default = false}):OnChanged(function(val)
-        HubState.AutoBuyUpgrades = val
-    end)
-
-    TabFarm:AddToggle("AutoGems", {Title = "Auto Collect Nearby Gems", Default = true}):OnChanged(function(val)
-        HubState.AutoCollectGems = val
-    end)
-
-    TabFarm:AddToggle("AutoDrone", {Title = "Auto Deploy Drone", Default = true}):OnChanged(function(val)
-        HubState.AutoDeployDrone = val
-    end)
-
-    TabFarm:AddButton({
-        Title = "Instant Sell Hay Now",
-        Description = "Teleports to Cow, sells, and returns immediately",
-        Callback = function()
-            task.spawn(function()
-                local hrp = getHRP()
-                if hrp then
-                    local backPos = hrp.CFrame
-                    teleportTo(Landmarks.SellCow)
-                    task.wait(0.25)
-                    if Remotes.SellHay then Remotes.SellHay:FireServer() end
-                    task.wait(0.3)
-                    teleportTo(backPos)
-                end
-            end)
-        end
-    })
-
-    -- TAB 2: Player Mods
-    local TabPlayer = Window:AddTab({Title = "Player", Icon = "user"})
-
-    TabPlayer:AddButton({
-        Title = "Snap to 3rd Person View (18 Studs)",
-        Description = "Instantly zooms camera out and allows rotation",
-        Callback = function() forceSnap3rdPerson(18) end
-    })
-
-    TabPlayer:AddToggle("FreeMouseToggle", {Title = "Free Mouse Cursor [LeftAlt / Insert]", Default = true}):OnChanged(function(val)
-        HubState.FreeMouse = val
-    end)
-
-    TabPlayer:AddToggle("SpeedToggle", {Title = "Enable Speed Modifier", Default = false}):OnChanged(function(val)
-        HubState.WalkSpeedEnabled = val
-    end)
-
-    TabPlayer:AddSlider("WalkSpeed", {
-        Title = "Walk Speed",
-        Default = 16,
-        Min = 16,
-        Max = 250,
-        Rounding = 0,
-        Callback = function(val) HubState.WalkSpeed = val end
-    })
-
-    TabPlayer:AddToggle("FlyToggle", {Title = "Fly (WASD + Space/Shift)", Default = false}):OnChanged(function(val)
-        HubState.FlyEnabled = val
-        toggleFly(val)
-    end)
-
-    TabPlayer:AddSlider("FlySpeed", {
-        Title = "Fly Speed",
-        Default = 80,
-        Min = 20,
-        Max = 300,
-        Rounding = 0,
-        Callback = function(val) HubState.FlySpeed = val end
-    })
-
-    TabPlayer:AddToggle("NoclipToggle", {Title = "Noclip", Default = false}):OnChanged(function(val)
-        HubState.NoclipEnabled = val
-    end)
-
-    TabPlayer:AddToggle("InfJump", {Title = "Infinite Jump", Default = false}):OnChanged(function(val)
-        HubState.InfiniteJump = val
-    end)
-
-    -- TAB 3: Teleports
-    local TabTP = Window:AddTab({Title = "Teleports", Icon = "map-pin"})
-
-    TabTP:AddButton({Title = "Teleport to Hayfield", Callback = function() teleportTo(Landmarks.HayCenter) end})
-    TabTP:AddButton({Title = "Teleport to Sell Cow", Callback = function() teleportTo(Landmarks.SellCow) end})
-    TabTP:AddButton({Title = "Teleport to Farmer NPC", Callback = function() teleportTo(Landmarks.FarmerNPC) end})
-    TabTP:AddButton({
-        Title = "Teleport to The Needle",
-        Callback = function()
-            if Landmarks.NeedleCFrame then teleportTo(Landmarks.NeedleCFrame)
-            else addLog("warn", "Needle not yet found") end
-        end
-    })
-
-    -- TAB 4: Lobby Automation
-    local TabAuto = Window:AddTab({Title = "Lobby Auto", Icon = "zap"})
-
-    TabAuto:AddParagraph({
-        Title = "Lobby Systems Info",
-        Content = IS_LOBBY and "You are in the Lobby. All features active." or "Notice: You are in a Match. Codes and Class Roll require the Lobby."
-    })
-
-    TabAuto:AddButton({Title = "Redeem All Promo Codes (Lobby)", Callback = function() redeemAllCodes() end})
-    TabAuto:AddButton({
-        Title = "Equip Cow Pet (Highest Capacity: 120)",
-        Callback = function() if Remotes.EquipPet then Remotes.EquipPet:InvokeServer("Cow") end end
-    })
-    TabAuto:AddButton({
-        Title = "Open Alien Chest",
-        Callback = function() if Remotes.OpenChest then Remotes.OpenChest:InvokeServer() end end
-    })
-    TabAuto:AddDropdown("TargetClassDrop", {
-        Title = "Target Class",
-        Values = {
-            "Starter", "Pack Mule", "Hay Merchant", "Forkmaster",
-            "Demolitionist", "Prospector", "Drone Specialist", "Ultimate Farmer"
-        },
-        Multi = false,
-        Default = 8,
-    }):OnChanged(function(val) HubState.TargetClass = val end)
-
-    TabAuto:AddToggle("RollToggle", {Title = "Auto Roll for Class", Default = false}):OnChanged(function(val)
-        HubState.AutoRollClass = val
-        if val then autoRollClassLoop() end
-    end)
-
-    -- TAB 5: ESP
-    local TabESP = Window:AddTab({Title = "ESP & Visuals", Icon = "eye"})
-
-    TabESP:AddToggle("RgbESP", {Title = "RGB / Rare Straws ESP (Magenta)", Default = true}):OnChanged(function(val) HubState.RgbESP = val end)
-    TabESP:AddToggle("NeedleESP", {Title = "Needle ESP (Yellow)", Default = true}):OnChanged(function(val) HubState.NeedleESP = val end)
-    TabESP:AddToggle("SellESP", {Title = "Sell Cow ESP (Cyan)", Default = true}):OnChanged(function(val) HubState.SellESP = val end)
-    TabESP:AddToggle("GemESP", {Title = "Gem ESP (Green)", Default = true}):OnChanged(function(val) HubState.GemESP = val end)
-    TabESP:AddToggle("PlayerESP", {Title = "Player ESP", Default = false}):OnChanged(function(val) HubState.PlayerESP = val end)
-
-    -- TAB 6: Console
-    local TabCon = Window:AddTab({Title = "Console", Icon = "terminal"})
-
-    local logParagraph = TabCon:AddParagraph({
-        Title = "Live Event Log",
-        Content = "Initializing..."
-    })
-
-    task.spawn(function()
-        while IsHubLoaded do
-            task.wait(1.5)
-            local recent = {}
-            local count = #LogEntries
-            local startIndex = math.max(1, count - 15)
-            for i = startIndex, count do table.insert(recent, LogEntries[i]) end
-            logParagraph:SetDesc(table.concat(recent, "\n"))
-        end
-    end)
-
-    TabCon:AddButton({
-        Title = "Clear Event Log",
-        Callback = function()
-            table.clear(LogEntries)
-            logParagraph:SetDesc("Logs cleared.")
-        end
-    })
-
-    -- TAB 7: Settings & Unload
-    local TabSettings = Window:AddTab({Title = "Settings", Icon = "settings"})
-
-    TabSettings:AddButton({
-        Title = "UNLOAD / DESTROY HUB",
-        Description = "Stops all loops, removes UI, and cleans up completely",
-        Callback = function()
-            pcall(function() Window:Destroy() end)
-            unloadHub()
-        end
-    })
-
-    Window:SelectTab(1)
-    addLog("info", "Fluent UI ready")
 end
 
--- SECTION 10: INITIALIZATION
-task.spawn(function()
-    pcall(function()
-        LocalPlayer.CameraMode = Enum.CameraMode.Classic
-        LocalPlayer.CameraMaxZoomDistance = 350
-        LocalPlayer.CameraMinZoomDistance = 0.5
-        forceSnap3rdPerson(18)
-    end)
-    initializeFluentUI()
-end)
+-- Initialize UI & Apply Camera Snap
+buildNativeUI()
+forceSnap3rdPerson(22)
+addLog("info", "Needle Hub v5.0 loaded successfully! Press LeftAlt to toggle mouse, hold RMB to rotate camera.")
