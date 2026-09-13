@@ -1,7 +1,7 @@
 {
-  "version": "5.5",
-  "versionNumber": 55,
+  "version": "5.8",
+  "versionNumber": 58,
   "gameCompatibility": "All Places (Lobby, Farmhouse, Basement) - Game Version v1068",
   "releaseDate": "2026-09-13",
-  "releaseNotes": "Dedicated Shop tab with distinct Robux vs Free in-game currency separation, investigated and enhanced Code Redemption system with real-time feedback and expanded codes batch, new v1068 Hay Mutations prioritization (Void 20x, Rainbow 10x, Electric 8x, Gold 6x), and rock-solid UI stability."
+  "releaseNotes": "Adds a default no-teleport gameplay mode: the player remains fully controllable while nearby hay, gems, tools, upgrades, Drone deployment, TNT, and server-authorized selling continue automatically. Legacy teleport farming remains optional."
 }

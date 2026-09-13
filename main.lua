@@ -1,5 +1,5 @@
 --[[
-    SEARCH FOR THE NEEDLE - ULTIMATE AUTOMATION HUB v5.5 PRO
+    SEARCH FOR THE NEEDLE - ULTIMATE AUTOMATION HUB v5.8 PRO
     Forensically Engineered from Luau Decompiler Bytecode Dump
     - Exact Multi-Grab Batching using LocalPlayer:GetAttribute("HayGrabCount") & getGrabCandidates
     - Rainbow / RGB Straw Priority via Neon, Material, and Config.isRainbow(hayId)
@@ -60,9 +60,30 @@ end
 
 local HubConnections = {}
 local HubThreads = {}
+local UIConnections = {}
 local IsHubLoaded = true
 local GlobalScreenGui = nil
 local FloatingButtonGui = nil
+
+local function trackUIConnection(connection)
+    if connection then
+        table.insert(UIConnections, connection)
+    end
+    return connection
+end
+
+local function clearUIConnections()
+    for _, connection in ipairs(UIConnections) do
+        pcall(function()
+            if typeof(connection) == "RBXScriptConnection" then
+                connection:Disconnect()
+            elseif type(connection) == "table" and connection.Disconnect then
+                connection:Disconnect()
+            end
+        end)
+    end
+    table.clear(UIConnections)
+end
 
 -- SECTION 2: PLACE CONTEXT & CONFIG
 local CURRENT_PLACE_ID = game.PlaceId
@@ -84,7 +105,7 @@ else
     GAME_MODE_NAME = "Place " .. tostring(CURRENT_PLACE_ID)
 end
 local CURRENT_PLACE_NAME = GAME_MODE_NAME
-local SCRIPT_VERSION = "5.5"
+local SCRIPT_VERSION = "5.8"
 local CurrentContextMode = IS_LOBBY and "Lobby" or "Match"
 
 -- Require game Config if available for exact mathematical rainbow calculations
@@ -104,6 +125,103 @@ pcall(function()
     end
 end)
 
+-- Account data is replicated through Shared.Services.Data, not Player attributes.
+-- Keep attribute/leaderstats fallbacks for compatibility with older place versions.
+local AccountDataService = nil
+local LastAccountDataBindAttempt = 0
+
+local function getAccountDataRoot()
+    if AccountDataService then
+        local ok, client = pcall(function()
+            return AccountDataService.client
+        end)
+        if ok and client then return client end
+    end
+
+    if LastAccountDataBindAttempt > 0 and os.clock() - LastAccountDataBindAttempt < 2 then return nil end
+    LastAccountDataBindAttempt = os.clock()
+
+    pcall(function()
+        local shared = ReplicatedStorage and ReplicatedStorage:FindFirstChild("Shared")
+        local services = shared and shared:FindFirstChild("Services")
+        local dataModule = services and services:FindFirstChild("Data")
+        if dataModule and dataModule:IsA("ModuleScript") then
+            AccountDataService = require(dataModule)
+        end
+    end)
+
+    if AccountDataService then
+        local ok, client = pcall(function()
+            return AccountDataService.client
+        end)
+        if ok then return client end
+    end
+    return nil
+end
+
+local function unwrapReactiveValue(value)
+    if value == nil then return nil end
+    local valueType = type(value)
+    if valueType ~= "table" and valueType ~= "function" then
+        return value
+    end
+
+    local ok, result = pcall(function()
+        return value()
+    end)
+    if ok and result ~= nil then return result end
+
+    if valueType == "table" then
+        local rawValue = rawget(value, "___X")
+        if rawValue ~= nil then return rawValue end
+    end
+    return nil
+end
+
+local function getAccountValue(key, fallback)
+    local root = getAccountDataRoot()
+    if root then
+        local snapshot = unwrapReactiveValue(root)
+        if type(snapshot) == "table" and snapshot[key] ~= nil then
+            return snapshot[key]
+        end
+
+        local ok, child = pcall(function()
+            return root[key]
+        end)
+        if ok then
+            local value = unwrapReactiveValue(child)
+            if value ~= nil then return value end
+        end
+    end
+
+    local attributeValue = LocalPlayer:GetAttribute(key)
+    if attributeValue ~= nil then return attributeValue end
+
+    local leaderstats = LocalPlayer:FindFirstChild("leaderstats")
+    local leaderValue = leaderstats and leaderstats:FindFirstChild(key)
+    if leaderValue and leaderValue:IsA("ValueBase") then
+        return leaderValue.Value
+    end
+    return fallback
+end
+
+local function getGemBalance()
+    return math.max(0, math.floor(tonumber(getAccountValue("Gems", 0)) or 0))
+end
+
+local function getActiveClass()
+    return tostring(getAccountValue("ActiveClass", "Starter") or "Starter")
+end
+
+local function formatNumber(value)
+    local number = math.floor(tonumber(value) or 0)
+    local sign = number < 0 and "-" or ""
+    local digits = tostring(math.abs(number))
+    local formatted = digits:reverse():gsub("(%d%d%d)", "%1."):reverse():gsub("^%.", "")
+    return sign .. formatted
+end
+
 -- SECTION 3: LOGGING SYSTEM
 local LogEntries = {}
 local MAX_LOGS = 100
@@ -119,7 +237,7 @@ local function addLog(level, message)
     print("[NeedleHub] " .. formatted)
 end
 
-addLog("info", "Initialized Hub v5.0 on " .. GAME_MODE_NAME)
+addLog("info", "Initialized Hub v" .. SCRIPT_VERSION .. " on " .. GAME_MODE_NAME)
 
 -- SECTION 4: CHARACTER & MOVEMENT HELPERS
 local function getCharacter()
@@ -330,6 +448,7 @@ local HubState = {
     TntInterval = 11,
     ForcedToolSlot = 0,
     FarmCooldown = 0.35,
+    NoTeleportMode = true,
 
     -- Player Mods
     FreeMouse = true,
@@ -371,6 +490,23 @@ local ToolNames = {
     [4] = "Drone",
     [5] = "Vacuum",
     [6] = "The Needle"
+}
+
+local SlotToolIds = {
+    [SLOT_HAND] = "Hand",
+    [SLOT_TNT] = "Tnt",
+    [SLOT_PITCHFORK] = "Pitchfork",
+    [SLOT_DRONE] = "Drone",
+    [SLOT_VACUUM] = "Vacuum",
+    [SLOT_NEEDLE] = "Needle",
+}
+
+local ToolOwnershipAttributes = {
+    Pitchfork = {"PitchforkOwned"},
+    Tnt = {"TntOwned"},
+    Drone = {"DroneOwned"},
+    Vacuum = {"VacuumOwned"},
+    Needle = {"NeedleOwned"},
 }
 
 local CachedHotbarSlots = nil
@@ -417,29 +553,13 @@ local function getCurrentEquippedSlot()
 end
 
 local function isToolOwned(toolName)
-    if toolName == "Needle" then
-        return LocalPlayer:GetAttribute("NeedleOwned") == true or LocalPlayer:GetAttribute("HasNeedle") == true
-    elseif toolName == "Vacuum" then
-        return (LocalPlayer:GetAttribute("VacuumOwned") == true
-            or LocalPlayer:GetAttribute("PermanentVacuumOwned") == true
-            or (LocalPlayer:GetAttribute("VacuumHeatTime") and LocalPlayer:GetAttribute("VacuumHeatTime") > 0)
-            or (LocalPlayer:GetAttribute("VacuumGrabCount") and LocalPlayer:GetAttribute("VacuumGrabCount") > 0))
-    elseif toolName == "Pitchfork" then
-        return (LocalPlayer:GetAttribute("PitchforkOwned") == true
-            or LocalPlayer:GetAttribute("PermanentPitchforkOwned") == true
-            or (LocalPlayer:GetAttribute("PitchforkReach") and LocalPlayer:GetAttribute("PitchforkReach") > 0)
-            or (LocalPlayer:GetAttribute("PitchforkScoop") and LocalPlayer:GetAttribute("PitchforkScoop") > 0))
-    elseif toolName == "Tnt" then
-        return (LocalPlayer:GetAttribute("TntOwned") == true
-            or LocalPlayer:GetAttribute("PermanentTntOwned") == true
-            or (LocalPlayer:GetAttribute("TntBlastRadius") and LocalPlayer:GetAttribute("TntBlastRadius") > 0)
-            or (LocalPlayer:GetAttribute("TntCooldown") and LocalPlayer:GetAttribute("TntCooldown") > 0))
-    elseif toolName == "Drone" then
-        return (LocalPlayer:GetAttribute("DroneOwned") == true
-            or LocalPlayer:GetAttribute("PermanentDroneOwned") == true
-            or (LocalPlayer:GetAttribute("DroneCapacity") and LocalPlayer:GetAttribute("DroneCapacity") > 0))
-    elseif toolName == "Hand" then
-        return true
+    if toolName == "Hand" then return true end
+    local attributes = ToolOwnershipAttributes[toolName]
+    if not attributes then return false end
+    for _, attributeName in ipairs(attributes) do
+        if LocalPlayer:GetAttribute(attributeName) == true then
+            return true
+        end
     end
     return false
 end
@@ -463,7 +583,11 @@ local function getBestAvailableToolSlot()
     -- Manual Override
     if HubState.ForcedToolSlot and HubState.ForcedToolSlot > 0 then
         local forced = HubState.ForcedToolSlot
-        return forced, ToolNames[forced] or ("Slot " .. tostring(forced))
+        local forcedToolId = SlotToolIds[forced]
+        if forcedToolId and isToolOwned(forcedToolId) then
+            return forced, ToolNames[forced] or ("Slot " .. tostring(forced))
+        end
+        HubState.ForcedToolSlot = 0
     end
 
     -- Priority 2: Vacuum (Slot 5) - Top tier harvester (5 batch + rapid suction)
@@ -481,23 +605,44 @@ local function getBestAvailableToolSlot()
 end
 
 local lastEquippedSlotLogged = -1
+local lastEquipAttemptAt = 0
+local stopVacuumAutomation
 local function equipToolSlot(slotIndex, silent)
-    if not slotIndex or type(slotIndex) ~= "number" then return end
-
-    -- 1. Game State Attributes
-    pcall(function()
-        LocalPlayer:SetAttribute("NeedleEquippedSlot", slotIndex)
-    end)
-
-    -- 2. Client Hotbar Module
-    local hotbar = getHotbarSlots()
-    if hotbar and type(hotbar.setEquipped) == "function" then
-        pcall(function()
-            hotbar.setEquipped(slotIndex, false)
-        end)
+    if not slotIndex or type(slotIndex) ~= "number" then return false end
+    local toolId = SlotToolIds[slotIndex]
+    if not toolId or not isToolOwned(toolId) then
+        if not silent then
+            addLog("warn", (ToolNames[slotIndex] or "Ferramenta") .. " ainda nao foi comprada.")
+        end
+        return false
     end
 
-    -- 3. Virtual Input Keypress Simulation (Keys 1 to 6)
+    local currentSlot = getCurrentEquippedSlot()
+    if currentSlot == slotIndex then return true end
+    if os.clock() - lastEquipAttemptAt < 0.18 then return false end
+    lastEquipAttemptAt = os.clock()
+    if currentSlot == SLOT_VACUUM and slotIndex ~= SLOT_VACUUM and stopVacuumAutomation then
+        stopVacuumAutomation()
+    end
+
+    -- The game's HotbarSlots module owns availability and equipped state.
+    local hotbar = getHotbarSlots()
+    if hotbar and type(hotbar.setEquipped) == "function" then
+        local ok = pcall(function()
+            hotbar.setEquipped(slotIndex, true)
+        end)
+        if ok and getCurrentEquippedSlot() == slotIndex then
+            if not silent and lastEquippedSlotLogged ~= slotIndex then
+                lastEquippedSlotLogged = slotIndex
+                addLog("info", "Ferramenta equipada: " .. (ToolNames[slotIndex] or ("Slot " .. tostring(slotIndex))))
+            end
+            return true
+        end
+        return false
+    end
+
+    -- Compatibility fallback for place versions where HotbarSlots is unavailable.
+    local sentKey = false
     pcall(function()
         local vim = safeService("VirtualInputManager")
         local keyMap = {
@@ -512,37 +657,15 @@ local function equipToolSlot(slotIndex, silent)
             vim:SendKeyEvent(true, keyMap[slotIndex], false, game)
             task.wait(0.015)
             vim:SendKeyEvent(false, keyMap[slotIndex], false, game)
+            sentKey = true
         end
     end)
-
-    -- 4. PlayerGui Hotbar Button Interaction
-    pcall(function()
-        local pg = LocalPlayer:FindFirstChild("PlayerGui")
-        if pg then
-            for _, gui in ipairs(pg:GetChildren()) do
-                if gui:IsA("ScreenGui") then
-                    for _, desc in ipairs(gui:GetDescendants()) do
-                        if (desc:IsA("ImageButton") or desc:IsA("TextButton")) and desc.Visible then
-                            if desc.Name == tostring(slotIndex) or desc.Name == ("Slot" .. tostring(slotIndex)) or desc:GetAttribute("Slot") == slotIndex then
-                                desc.Selectable = true
-                                if firesignal then
-                                    firesignal(desc.MouseButton1Click)
-                                elseif desc.Activate then
-                                    desc:Activate()
-                                end
-                            end
-                        end
-                    end
-                end
-            end
-        end
-    end)
-
-    if not silent and lastEquippedSlotLogged ~= slotIndex then
+    local equipped = sentKey and getCurrentEquippedSlot() == slotIndex
+    if equipped and not silent and lastEquippedSlotLogged ~= slotIndex then
         lastEquippedSlotLogged = slotIndex
-        local tName = ToolNames[slotIndex] or ("Slot " .. tostring(slotIndex))
-        addLog("info", "Equipped Tool: " .. tName .. " (Slot " .. slotIndex .. ")")
+        addLog("info", "Ferramenta equipada: " .. (ToolNames[slotIndex] or ("Slot " .. tostring(slotIndex))))
     end
+    return equipped
 end
 
 -- Dedicated Autonomous TNT Thrower
@@ -561,6 +684,7 @@ local function throwTntAt(targetPos)
     end
 
     local prevSlot = getCurrentEquippedSlot()
+    if stopVacuumAutomation then stopVacuumAutomation() end
     equipToolSlot(SLOT_TNT, true)
     task.wait(0.06)
 
@@ -598,13 +722,14 @@ local function getToolStatusSummary()
     local curName = ToolNames[curSlot] or ("Slot " .. tostring(curSlot))
     local bestSlot, bestName = getBestAvailableToolSlot()
 
-    local vOwned = isToolOwned("Vacuum") and (isVacuumReady() and "YES" or "OVERHEATED") or "NO"
-    local pOwned = isToolOwned("Pitchfork") and "YES" or "NO"
-    local tOwned = isToolOwned("Tnt") and "YES" or "NO"
-    local dOwned = isToolOwned("Drone") and (LocalPlayer:GetAttribute("DroneDeployed") == true and "DEPLOYED" or "YES") or "NO"
+    local vOwned = isToolOwned("Vacuum") and (isVacuumReady() and "sim" or "superaquecido") or "nao"
+    local pOwned = isToolOwned("Pitchfork") and "sim" or "nao"
+    local tOwned = isToolOwned("Tnt") and "sim" or "nao"
+    local dOwned = isToolOwned("Drone") and (LocalPlayer:GetAttribute("DroneDeployed") == true and "ativo" or "sim") or "nao"
 
-    return string.format("Active: [%s] (Slot %d) | Best: [%s]\nOwned: Vacuum: %s | Pitchfork: %s | TNT: %s | Drone: %s",
-        curName, curSlot, bestName, vOwned, pOwned, tOwned, dOwned)
+    local movementMode = HubState.NoTeleportMode and "sem teleporte" or "autonomo com teleporte"
+    return string.format("Modo: %s | Em uso: %s (slot %d) | Melhor: %s\nAspirador: %s | Forquilha: %s | TNT: %s | Drone: %s",
+        movementMode, curName, curSlot, bestName, vOwned, pOwned, tOwned, dOwned)
 end
 
 local function getHayHeld()
@@ -622,19 +747,33 @@ end
 local function getGrabCount()
     local val = LocalPlayer:GetAttribute("HayGrabCount")
     if val and type(val) == "number" and val > 0 then return val end
-    return 4 -- Default high grab
+    return 1
 end
 
 local function getGrabRadius()
     local val = LocalPlayer:GetAttribute("HayGrabRadius")
-    if val and type(val) == "number" and val > 0 then return val end
-    return 2.5
+    if type(val) == "number" and val >= 0 then return val end
+    return 0
 end
 
 local function getPickCooldown()
     local val = LocalPlayer:GetAttribute("HayPickCooldown")
     if val and type(val) == "number" and val > 0 then return val end
-    return 0.35
+    return tonumber(HaystackConfig and HaystackConfig.PICK_COOLDOWN) or 0.55
+end
+
+local function getToolReach(slotIndex)
+    if slotIndex == SLOT_VACUUM then
+        return tonumber(HaystackConfig and HaystackConfig.VACUUM_RANGE) or 11
+    elseif slotIndex == SLOT_PITCHFORK then
+        return tonumber(HaystackConfig and HaystackConfig.PITCHFORK_REACH) or 4.2
+    end
+    return tonumber(HaystackConfig and HaystackConfig.INTERACT_DISTANCE) or 20
+end
+
+local function isHayWithinReach(part, origin, slotIndex)
+    if not part or not origin then return false end
+    return (part.Position - origin).Magnitude <= getToolReach(slotIndex)
 end
 
 -- Snap camera to 3rd person
@@ -725,17 +864,128 @@ local function getGrabCandidates(primaryPart)
     return candidateIds
 end
 
+-- Tool-specific harvesting must mirror the live clients. Mixing PickHay with a
+-- pitchfork/vacuum action makes the server resolve the same strand as a hand pick.
+local VacuumAutomationActive = false
+local LastPitchforkDigAt = 0
+
+stopVacuumAutomation = function()
+    if VacuumAutomationActive and Remotes.VacuumAction then
+        pcall(function()
+            Remotes.VacuumAction:FireServer("Stop")
+        end)
+    end
+    VacuumAutomationActive = false
+end
+
+local function startVacuumAutomation()
+    if VacuumAutomationActive then return true end
+    if not Remotes.VacuumAction or not isVacuumReady() then return false end
+    if getCurrentEquippedSlot() ~= SLOT_VACUUM then return false end
+    local ok = pcall(function()
+        Remotes.VacuumAction:FireServer("Start")
+    end)
+    VacuumAutomationActive = ok
+    return ok
+end
+
+local function getVacuumCandidateIds(primaryPart)
+    local ids = {}
+    local seen = {}
+    local function addPart(part)
+        local hayId = part and part:GetAttribute("HayId")
+        if type(hayId) == "number" and not seen[hayId] and #ids < 8 then
+            seen[hayId] = true
+            table.insert(ids, hayId)
+        end
+    end
+
+    addPart(primaryPart)
+    local haystack = workspace:FindFirstChild("HaystackClient")
+    if not haystack or not primaryPart or #ids >= 8 then return ids end
+
+    local radius = tonumber(HaystackConfig and HaystackConfig.VACUUM_HARVEST_REACH) or 2.85
+    local params = OverlapParams.new()
+    params.FilterType = Enum.RaycastFilterType.Include
+    params.FilterDescendantsInstances = {haystack}
+    params.MaxParts = 96
+    local nearby = workspace:GetPartBoundsInRadius(primaryPart.Position, radius, params)
+    table.sort(nearby, function(a, b)
+        return (a.Position - primaryPart.Position).Magnitude < (b.Position - primaryPart.Position).Magnitude
+    end)
+    for _, part in ipairs(nearby) do
+        addPart(part)
+        if #ids >= 8 then break end
+    end
+    return ids
+end
+
+local function harvestWithEquippedTool(primaryPart)
+    if not primaryPart or not primaryPart.Parent then return false end
+    local hayId = primaryPart:GetAttribute("HayId")
+    if type(hayId) ~= "number" then return false end
+
+    LocalPlayer:SetAttribute("HoveredHayId", hayId)
+    local activeSlot = getCurrentEquippedSlot()
+
+    if activeSlot == SLOT_VACUUM and isVacuumReady() then
+        if not startVacuumAutomation() then return false end
+        local nozzle = workspace:FindFirstChild("VacuumNozzlePointClient")
+        local nozzlePosition = nozzle and nozzle:IsA("BasePart") and nozzle.Position
+        local hrp = getHRP()
+        nozzlePosition = nozzlePosition or (hrp and (hrp.Position + Vector3.new(0, 1.5, 0))) or primaryPart.Position
+        local preferredIds = getVacuumCandidateIds(primaryPart)
+        return pcall(function()
+            Remotes.VacuumAction:FireServer("Tick", primaryPart.Position, nozzlePosition, preferredIds)
+        end)
+    end
+
+    stopVacuumAutomation()
+    if activeSlot == SLOT_PITCHFORK and isToolOwned("Pitchfork") and Remotes.PitchforkDig then
+        local cooldown = tonumber(LocalPlayer:GetAttribute("PitchforkCooldown"))
+            or tonumber(HaystackConfig and HaystackConfig.PITCHFORK_COOLDOWN)
+            or 0.85
+        if os.clock() - LastPitchforkDigAt < cooldown then return false end
+        LastPitchforkDigAt = os.clock()
+        return pcall(function()
+            Remotes.PitchforkDig:FireServer(hayId)
+        end)
+    end
+
+    if activeSlot == SLOT_HAND and Remotes.PickHay then
+        local candidates = HubState.BatchMultiGrab and getGrabCandidates(primaryPart) or {}
+        return pcall(function()
+            Remotes.PickHay:FireServer(hayId, candidates)
+        end)
+    end
+    return false
+end
+
 -- SECTION 8: AUTOMATION ENGINES
 
 -- 8.1 FAST BATCH AUTO-FARM ENGINE (FULL RGB HUNTING + MULTI-GRAB + AUTO-SELL)
 local isCurrentlySelling = false
 local recentlyAttemptedStrands = {}
+local cachedRainbowStrands = {}
+local lastRainbowScanAt = 0
+local lastNoTeleportSellAttemptAt = 0
+local lastNoTeleportNoticeAt = 0
 
 -- Function to find ALL active Rainbow / RGB strands across the entire map
 local function getAllRainbowStrands()
     local haystack = workspace:FindFirstChild("HaystackClient")
     local rgbList = {}
     local now = os.clock()
+
+    if now - lastRainbowScanAt < 0.65 then
+        for _, part in ipairs(cachedRainbowStrands) do
+            if part and part.Parent and part:IsDescendantOf(workspace) then
+                table.insert(rgbList, part)
+            end
+        end
+        return rgbList
+    end
+    lastRainbowScanAt = now
 
     -- 1. Check all strands in HaystackClient (no limits / full map scan)
     if haystack then
@@ -764,12 +1014,49 @@ local function getAllRainbowStrands()
         end
     end
 
+    cachedRainbowStrands = rgbList
+    return rgbList
+end
+
+local function getNearbyHayParts(origin, radius)
+    local haystack = workspace:FindFirstChild("HaystackClient")
+    if not haystack then return {} end
+    local params = OverlapParams.new()
+    params.FilterType = Enum.RaycastFilterType.Include
+    params.FilterDescendantsInstances = {haystack}
+    params.MaxParts = 128
+    return workspace:GetPartBoundsInRadius(origin, radius, params)
+end
+
+local function getNearbyRainbowStrands(origin, radius)
+    local rgbList = {}
+    for _, part in ipairs(getNearbyHayParts(origin, radius)) do
+        if part:IsA("BasePart") and part:GetAttribute("HayId") and isRainbowStrand(part) then
+            table.insert(rgbList, part)
+        end
+    end
+    local dropped = workspace:FindFirstChild("DroppedHay")
+    if dropped then
+        for _, part in ipairs(dropped:GetChildren()) do
+            if part:IsA("BasePart") and (part.Position - origin).Magnitude <= 20 and isRainbowStrand(part) then
+                table.insert(rgbList, part)
+            end
+        end
+    end
     return rgbList
 end
 
 local farmThread = task.spawn(function()
     while IsHubLoaded do
+        local equippedSlot = getCurrentEquippedSlot()
         local cooldown = getPickCooldown()
+        if equippedSlot == SLOT_VACUUM and isVacuumReady() then
+            cooldown = tonumber(HaystackConfig and HaystackConfig.VACUUM_TICK) or 0.16
+        elseif equippedSlot == SLOT_PITCHFORK then
+            cooldown = tonumber(LocalPlayer:GetAttribute("PitchforkCooldown"))
+                or tonumber(HaystackConfig and HaystackConfig.PITCHFORK_COOLDOWN)
+                or 0.85
+        end
         task.wait(cooldown)
 
         if HubState.AutoFarmHay and IS_GAMEPLAY and not isCurrentlySelling then
@@ -781,51 +1068,54 @@ local farmThread = task.spawn(function()
                 local maxCap = getHayCapacity()
 
                 -- FULL BAG CHECK -> COMPLETE AUTONOMOUS SELL CYCLE
-                if currentHay >= maxCap and maxCap > 0 and HubState.AutoSell then
-                    isCurrentlySelling = true
-                    addLog("info", "Bag full (" .. currentHay .. "/" .. maxCap .. "). Travelling to Sell Cow...")
-
-                    local farmReturnCFrame = hrp.CFrame
-                    scanExactLandmarks()
-
-                    -- Teleport to Cow / Sell Part
-                    teleportTo(Landmarks.SellCow)
-                    task.wait(0.2)
-
-                    -- Fire Sell Remote
-                    if Remotes.SellHay then
-                        pcall(function() Remotes.SellHay:FireServer() end)
-                    end
-
-                    -- Wait until confirmed sold
-                    local sellTimeout = os.clock()
-                    while getHayHeld() > 0 and (os.clock() - sellTimeout) < 0.6 do
-                        task.wait(0.06)
-                        if Remotes.SellHay then pcall(function() Remotes.SellHay:FireServer() end) end
-                    end
-
-                    addLog("info", "Hay sold! Returning to harvest...")
-
-                    -- Teleport back to hay pile
-                    teleportTo(farmReturnCFrame)
-                    task.wait(0.12)
-
-                    isCurrentlySelling = false
-                else
-                    -- 0. Auto Deploy Drone if owned and not deployed
-                    if HubState.AutoDeployDrone and isToolOwned("Drone") and LocalPlayer:GetAttribute("DroneDeployed") ~= true then
-                        if Remotes.DeployDrone then
-                            pcall(function() Remotes.DeployDrone:FireServer() end)
+                if currentHay >= maxCap and maxCap > 0 and not HubState.AutoSell then
+                    stopVacuumAutomation()
+                elseif currentHay >= maxCap and maxCap > 0 and HubState.AutoSell then
+                    stopVacuumAutomation()
+                    if HubState.NoTeleportMode then
+                        local now = os.clock()
+                        if Remotes.SellHay and now - lastNoTeleportSellAttemptAt >= 1.25 then
+                            lastNoTeleportSellAttemptAt = now
+                            pcall(function() Remotes.SellHay:FireServer() end)
                         end
-                    end
+                        if now - lastNoTeleportNoticeAt >= 8 then
+                            lastNoTeleportNoticeAt = now
+                            local sellDistance = (hrp.Position - Landmarks.SellCow).Magnitude
+                            addLog("info", string.format("Bolsa cheia. Venda sem teleporte solicitada; se necessario, aproxime-se e olhe para a vaca (%.0f studs).", sellDistance))
+                        end
+                    else
+                        isCurrentlySelling = true
+                        addLog("info", "Bag full (" .. currentHay .. "/" .. maxCap .. "). Travelling to Sell Cow...")
 
+                        local farmReturnCFrame = hrp.CFrame
+                        scanExactLandmarks()
+                        teleportTo(Landmarks.SellCow)
+                        task.wait(0.2)
+
+                        if Remotes.SellHay then
+                            pcall(function() Remotes.SellHay:FireServer() end)
+                        end
+
+                        local sellTimeout = os.clock()
+                        while getHayHeld() > 0 and (os.clock() - sellTimeout) < 0.6 do
+                            task.wait(0.06)
+                            if Remotes.SellHay then pcall(function() Remotes.SellHay:FireServer() end) end
+                        end
+
+                        addLog("info", "Hay sold! Returning to harvest...")
+                        teleportTo(farmReturnCFrame)
+                        task.wait(0.12)
+                        isCurrentlySelling = false
+                    end
+                else
                     -- 1. Intelligent Tool Recognition & Auto-Equip
                     local activeSlot = getCurrentEquippedSlot()
                     if HubState.AutoEquipBestTool then
                         local bestSlot, bestName = getBestAvailableToolSlot()
                         if activeSlot ~= bestSlot then
-                            equipToolSlot(bestSlot)
-                            activeSlot = bestSlot
+                            if equipToolSlot(bestSlot) then
+                                activeSlot = getCurrentEquippedSlot()
+                            end
                         end
                     end
 
@@ -835,31 +1125,43 @@ local farmThread = task.spawn(function()
                     -- 2. FULL RAINBOW HUNTING
                     local rgbStrands = {}
                     if HubState.PrioritizeRGB then
-                        rgbStrands = getAllRainbowStrands()
+                        if HubState.NoTeleportMode then
+                            rgbStrands = getNearbyRainbowStrands(myPos, getToolReach(activeSlot))
+                        else
+                            rgbStrands = getAllRainbowStrands()
+                        end
                     end
 
+                    local targetRgb = nil
                     if #rgbStrands > 0 then
-                        -- Sort by distance to player: harvest closest RGB first
                         table.sort(rgbStrands, function(a, b)
                             return (a.Position - myPos).Magnitude < (b.Position - myPos).Magnitude
                         end)
+                        for _, candidate in ipairs(rgbStrands) do
+                            local isDropped = candidate.Parent and candidate.Parent.Name == "DroppedHay"
+                            local reachable = isDropped and (candidate.Position - myPos).Magnitude <= 20
+                                or isHayWithinReach(candidate, myPos, activeSlot)
+                            if not HubState.NoTeleportMode or reachable then
+                                targetRgb = candidate
+                                break
+                            end
+                        end
+                    end
 
-                        local targetRgb = rgbStrands[1]
+                    if targetRgb then
                         local targetPos = targetRgb.Position
                         local rId = targetRgb:GetAttribute("HayId")
 
-                        -- Teleport player directly ON TOP of the RGB strand
-                        hrp.CFrame = CFrame.new(targetPos + Vector3.new(0, 0.6, 0))
-                        task.wait(0.04)
+                        if not HubState.NoTeleportMode then
+                            hrp.CFrame = CFrame.new(targetPos + Vector3.new(0, 0.6, 0))
+                            task.wait(0.04)
+                        end
 
                         if targetRgb.Parent and targetRgb.Parent.Name == "DroppedHay" then
                             if Remotes.PickDroppedHay then
                                 pcall(function() Remotes.PickDroppedHay:FireServer(targetRgb) end)
                             end
-                        elseif rId and Remotes.PickHay then
-                            LocalPlayer:SetAttribute("HoveredHayId", rId)
-                            local candidates = getGrabCandidates(targetRgb)
-
+                        elseif rId then
                             -- Track attempt
                             local now = os.clock()
                             if not recentlyAttemptedStrands[rId] then
@@ -869,38 +1171,12 @@ local farmThread = task.spawn(function()
                                 recentlyAttemptedStrands[rId].count = recentlyAttemptedStrands[rId].count + 1
                             end
 
-                            -- Tool-specific action trigger
-                            if activeSlot == SLOT_PITCHFORK then
-                                if Remotes.PitchforkDig then
-                                    pcall(function() Remotes.PitchforkDig:FireServer(rId) end)
-                                end
-                                if Remotes.HeldToolState then
-                                    pcall(function() Remotes.HeldToolState:FireServer("Pitchfork", "dig") end)
-                                end
-                                pcall(function() LocalPlayer:SetAttribute("PitchforkPhase", "strike") end)
-                            elseif activeSlot == SLOT_VACUUM then
-                                pcall(function() LocalPlayer:SetAttribute("VacuumActive", true) end)
-                                if Remotes.VacuumAction then
-                                    pcall(function() Remotes.VacuumAction:FireServer(targetPos, hrp.CFrame.LookVector) end)
-                                end
-                                if Remotes.VacuumHarvest then
-                                    pcall(function() Remotes.VacuumHarvest:FireServer(targetPos, candidates) end)
-                                end
-                                if Remotes.VacuumDig then
-                                    pcall(function() Remotes.VacuumDig:FireServer(rId) end)
-                                end
-                            end
-
-                            pcall(function()
-                                Remotes.PickHay:FireServer(rId, candidates)
-                            end)
-                            addLog("info", string.format("FOCUSED RGB straw [%s] using [%s] (+%d batch) | %d RGBs remaining",
-                                tostring(rId), ToolNames[activeSlot] or "Hand", #candidates, #rgbStrands))
+                            harvestWithEquippedTool(targetRgb)
                         end
                     else
                         -- 3. NORMAL HAY HARVESTING (when 0 RGB straws remain on field)
                         if haystack then
-                            local children = haystack:GetChildren()
+                            local children = HubState.NoTeleportMode and getNearbyHayParts(myPos, getToolReach(activeSlot)) or haystack:GetChildren()
                             local primaryPart = nil
                             local minDistance = 9999
 
@@ -908,11 +1184,12 @@ local farmThread = task.spawn(function()
                             for _, p in ipairs(children) do
                                 if p:IsA("BasePart") and p.Parent == haystack then
                                     local dist = (p.Position - myPos).Magnitude
-                                    if dist < 4.5 then
+                                    local reachable = not HubState.NoTeleportMode or dist <= getToolReach(activeSlot)
+                                    if reachable and dist < 4.5 then
                                         primaryPart = p
                                         minDistance = dist
                                         break
-                                    elseif dist < minDistance then
+                                    elseif reachable and dist < minDistance then
                                         minDistance = dist
                                         primaryPart = p
                                     end
@@ -921,41 +1198,14 @@ local farmThread = task.spawn(function()
 
                             if primaryPart then
                                 -- If more than 8 studs away, teleport directly onto it
-                                if minDistance > 8 then
+                                if not HubState.NoTeleportMode and minDistance > 8 then
                                     hrp.CFrame = CFrame.new(primaryPart.Position + Vector3.new(0, 0.6, 0))
                                     task.wait(0.04)
                                 end
 
                                 local pId = primaryPart:GetAttribute("HayId")
-                                if pId and Remotes.PickHay then
-                                    LocalPlayer:SetAttribute("HoveredHayId", pId)
-                                    local candidates = getGrabCandidates(primaryPart)
-
-                                    -- Tool-specific action trigger
-                                    if activeSlot == SLOT_PITCHFORK then
-                                        if Remotes.PitchforkDig then
-                                            pcall(function() Remotes.PitchforkDig:FireServer(pId) end)
-                                        end
-                                        if Remotes.HeldToolState then
-                                            pcall(function() Remotes.HeldToolState:FireServer("Pitchfork", "dig") end)
-                                        end
-                                        pcall(function() LocalPlayer:SetAttribute("PitchforkPhase", "strike") end)
-                                    elseif activeSlot == SLOT_VACUUM then
-                                        pcall(function() LocalPlayer:SetAttribute("VacuumActive", true) end)
-                                        if Remotes.VacuumAction then
-                                            pcall(function() Remotes.VacuumAction:FireServer(primaryPart.Position, hrp.CFrame.LookVector) end)
-                                        end
-                                        if Remotes.VacuumHarvest then
-                                            pcall(function() Remotes.VacuumHarvest:FireServer(primaryPart.Position, candidates) end)
-                                        end
-                                        if Remotes.VacuumDig then
-                                            pcall(function() Remotes.VacuumDig:FireServer(pId) end)
-                                        end
-                                    end
-
-                                    pcall(function()
-                                        Remotes.PickHay:FireServer(pId, candidates)
-                                    end)
+                                if pId then
+                                    harvestWithEquippedTool(primaryPart)
                                 end
                             end
                         end
@@ -973,6 +1223,8 @@ local farmThread = task.spawn(function()
                     end
                 end
             end
+        else
+            stopVacuumAutomation()
         end
     end
 end)
@@ -989,7 +1241,10 @@ local tntThread = task.spawn(function()
                 local currentHay = getHayHeld()
                 local maxCap = getHayCapacity()
                 local now = os.clock()
-                local cd = LocalPlayer:GetAttribute("TntCooldown") or HubState.TntInterval or 11
+                local serverCooldown = tonumber(LocalPlayer:GetAttribute("TntCooldown"))
+                    or tonumber(HaystackConfig and HaystackConfig.TNT_COOLDOWN)
+                    or 20
+                local cd = math.max(serverCooldown, tonumber(HubState.TntInterval) or serverCooldown)
                 if (now - lastAutoTntThrow) >= cd and (maxCap - currentHay) >= 10 then
                     lastAutoTntThrow = now
                     local target = nil
@@ -1035,7 +1290,7 @@ local gemThread = task.spawn(function()
                             if dist <= 28 then
                                 pcall(function() Remotes.CollectGem:FireServer(gemId) end)
                                 addLog("info", "Collected Gem [" .. tostring(gemId) .. "] within reach")
-                            elseif HubState.AutoFarmHay and dist <= 45 then
+                            elseif not HubState.NoTeleportMode and HubState.AutoFarmHay and dist <= 45 then
                                 -- Quick hop to grab gem
                                 local prev = hrp.CFrame
                                 teleportTo(gemPos + Vector3.new(0, 1.5, 0))
@@ -1043,7 +1298,7 @@ local gemThread = task.spawn(function()
                                 pcall(function() Remotes.CollectGem:FireServer(gemId) end)
                                 teleportTo(prev)
                             end
-                        else
+                        elseif not HubState.NoTeleportMode then
                             pcall(function() Remotes.CollectGem:FireServer(gemId) end)
                         end
                     end
@@ -1056,7 +1311,7 @@ table.insert(HubThreads, gemThread)
 
 if Remotes.GemSpawned then
     local conn = Remotes.GemSpawned.OnClientEvent:Connect(function(gemId)
-        if HubState.AutoCollectGems and Remotes.CollectGem and gemId then
+        if HubState.AutoCollectGems and not HubState.NoTeleportMode and Remotes.CollectGem and gemId then
             pcall(function() Remotes.CollectGem:FireServer(gemId) end)
         end
     end)
@@ -1064,6 +1319,7 @@ if Remotes.GemSpawned then
 end
 
 -- 8.3 AUTO-WIN NEEDLE ENGINE
+local lastNeedleMovementNoticeAt = 0
 local needleThread = task.spawn(function()
     while IsHubLoaded do
         task.wait(0.4)
@@ -1071,28 +1327,22 @@ local needleThread = task.spawn(function()
             local needleOwned = LocalPlayer:GetAttribute("NeedleOwned")
 
             if needleOwned then
-                addLog("warn", "Needle is in your hands! Equipping Slot 6 and teleporting to Farmer NPC...")
                 equipToolSlot(SLOT_NEEDLE)
                 scanExactLandmarks()
-                teleportTo(Landmarks.FarmerNPC)
-                task.wait(0.2)
-
-                -- Fire hand-in remote
-                if Remotes.NeedleHandIn then
-                    pcall(function() Remotes.NeedleHandIn:FireServer() end)
-                end
-
-                -- Trigger any proximity prompts on farmer
-                local farmer = workspace:FindFirstChild("NPC") and workspace.NPC:FindFirstChild("Farmer_NPC")
-                if farmer then
-                    for _, prompt in ipairs(farmer:GetDescendants()) do
-                        if prompt:IsA("ProximityPrompt") then
-                            pcall(function() fireproximityprompt(prompt) end)
-                        end
+                local hrp = getHRP()
+                local farmerDistance = hrp and (hrp.Position - Landmarks.FarmerNPC).Magnitude or math.huge
+                if not HubState.NoTeleportMode or farmerDistance <= 12 then
+                    if not HubState.NoTeleportMode then
+                        teleportTo(Landmarks.FarmerNPC)
+                        task.wait(0.2)
                     end
+                    if Remotes.NeedleHandIn then
+                        pcall(function() Remotes.NeedleHandIn:FireServer() end)
+                    end
+                elseif os.clock() - lastNeedleMovementNoticeAt >= 8 then
+                    lastNeedleMovementNoticeAt = os.clock()
+                    addLog("info", string.format("Agulha coletada. Aproxime-se do fazendeiro para entregar sem teleporte (%.0f studs).", farmerDistance))
                 end
-                addLog("info", "Handed in needle to Farmer NPC! Match Won!")
-                task.wait(2)
             else
                 -- Scan for Needle Part in workspace or target HayId
                 local needlePart = nil
@@ -1122,16 +1372,15 @@ local needleThread = task.spawn(function()
                 end
 
                 if needlePart then
-                    addLog("info", "Needle detected! Teleporting to pick it up...")
-                    teleportTo(needlePart.Position + Vector3.new(0, 1.2, 0))
-                    task.wait(0.08)
-
-                    -- Game fires PickHay with "Objective" to grab the needle
-                    if Remotes.PickHay then
-                        pcall(function() Remotes.PickHay:FireServer("Objective") end)
+                    local hrp = getHRP()
+                    local needleDistance = hrp and (needlePart.Position - hrp.Position).Magnitude or math.huge
+                    if not HubState.NoTeleportMode then
+                        teleportTo(needlePart.Position + Vector3.new(0, 1.2, 0))
+                        task.wait(0.08)
                     end
-                    if Remotes.PickHay and needlePart:GetAttribute("HayId") then
-                        pcall(function() Remotes.PickHay:FireServer(needlePart:GetAttribute("HayId")) end)
+                    local interactDistance = tonumber(HaystackConfig and HaystackConfig.INTERACT_DISTANCE) or 20
+                    if Remotes.PickHay and (not HubState.NoTeleportMode or needleDistance <= interactDistance) then
+                        pcall(function() Remotes.PickHay:FireServer("Objective") end)
                     end
                 end
             end
@@ -1154,49 +1403,239 @@ local droneThread = task.spawn(function()
 end)
 table.insert(HubThreads, droneThread)
 
--- 8.5 AUTO-BUY TOOLS & UPGRADES
+-- 8.5 PRICE-AWARE AUTO-BUY TOOLS & UPGRADES
 local barnToolNames = {"Pitchfork", "Tnt", "Drone", "Vacuum"}
-local barnToolAttributes = {
-    Pitchfork = "PitchforkOwned",
-    Tnt = "TntOwned",
-    Drone = "DroneOwned",
-    Vacuum = "VacuumOwned"
+local BarnToolDisplayNames = {
+    Pitchfork = "Forquilha",
+    Tnt = "Dinamite",
+    Drone = "Drone agricola",
+    Vacuum = "Aspirador",
 }
-
+local UpgradeToolRequirements = {
+    TntLuck = "Tnt", TntCooldown = "Tnt", TntPower = "Tnt",
+    PitchforkCooldown = "Pitchfork", PitchforkHold = "Pitchfork", Pitchfork = "Pitchfork",
+    DroneSpeed = "Drone", DroneGrab = "Drone", DroneCapacity = "Drone",
+    VacuumPower = "Vacuum", VacuumCooling = "Vacuum", VacuumRuntime = "Vacuum",
+}
 local upgradeTracks = {
-    "Capacity", "Grab", "Speed", "VacuumPower", "VacuumRuntime",
-    "VacuumCooling", "PitchforkCooldown", "PitchforkHold", "DroneGrab",
-    "DroneSpeed", "DroneCapacity", "TntLuck", "TntPower", "TntCooldown"
+    "Capacity", "HandHold", "Speed", "Grab",
+    "PitchforkCooldown", "PitchforkHold", "Pitchfork",
+    "TntLuck", "TntCooldown", "TntPower",
+    "DroneSpeed", "DroneGrab", "DroneCapacity",
+    "VacuumPower", "VacuumCooling", "VacuumRuntime",
 }
+local PendingToolPurchases = {}
+local PendingUpgradePurchases = {}
 
-task.spawn(function()
+local function getCashBalance()
+    local leaderstats = LocalPlayer:FindFirstChild("leaderstats")
+    local cash = leaderstats and leaderstats:FindFirstChild("Cash")
+    return math.max(0, tonumber(cash and cash.Value) or 0)
+end
+
+local function formatCash(value)
+    local cents = math.max(0, math.floor((tonumber(value) or 0) + 0.5))
+    local dollars = math.floor(cents / 100)
+    local digits = tostring(dollars):reverse():gsub("(%d%d%d)", "%1,"):reverse():gsub("^,", "")
+    return "$" .. digits .. string.format(".%02d", cents % 100)
+end
+
+local function findBarnShopItem(itemId)
+    local barnShop = workspace:FindFirstChild("BarnShop")
+    if not barnShop then return nil end
+    if barnShop:GetAttribute("ShopItemId") == itemId then return barnShop end
+    for _, item in ipairs(barnShop:GetDescendants()) do
+        if item:GetAttribute("ShopItemId") == itemId then
+            return item
+        end
+    end
+    return nil
+end
+
+local function getBarnToolInfo(itemId)
+    local item = findBarnShopItem(itemId)
+    local info = {
+        id = itemId,
+        displayName = BarnToolDisplayNames[itemId] or itemId,
+        item = item,
+        currency = nil,
+        price = nil,
+    }
+    if not item then return info end
+    info.displayName = tostring(item:GetAttribute("ShopName") or info.displayName)
+    for _, suffix in ipairs({"A", "B", "C"}) do
+        local currency = item:GetAttribute("ShopCurrency" .. suffix)
+        local rawPrice = item:GetAttribute("ShopPrice" .. suffix)
+        if currency and currency ~= "Robux" and rawPrice ~= nil then
+            info.currency = tostring(currency)
+            info.price = tonumber(rawPrice)
+            if info.price then break end
+        end
+    end
+    return info
+end
+
+local function requestBarnToolPurchase(itemId, manual)
+    if isToolOwned(itemId) then
+        PendingToolPurchases[itemId] = nil
+        if manual then addLog("info", (BarnToolDisplayNames[itemId] or itemId) .. " ja esta comprada.") end
+        return false, "OWNED"
+    end
+    if not Remotes.BuyShopItem then return false, "REMOTE" end
+
+    local pendingAt = PendingToolPurchases[itemId]
+    if pendingAt and os.clock() - pendingAt < 5 then return false, "PENDING" end
+    local info = getBarnToolInfo(itemId)
+    if not info.item or not info.price then
+        if manual then addLog("warn", "Preco de " .. info.displayName .. " ainda nao foi carregado pela loja.") end
+        return false, "PRICE"
+    end
+    local cash = getCashBalance()
+    if cash < info.price then
+        if manual then
+            addLog("warn", string.format("Saldo insuficiente: %s custa %s; faltam %s.", info.displayName, formatCash(info.price), formatCash(info.price - cash)))
+        end
+        return false, "CASH"
+    end
+
+    PendingToolPurchases[itemId] = os.clock()
+    local ok = pcall(function()
+        Remotes.BuyShopItem:FireServer(itemId)
+    end)
+    if not ok then PendingToolPurchases[itemId] = nil end
+    if manual and ok then addLog("info", "Compra solicitada: " .. info.displayName .. " por " .. formatCash(info.price) .. ".") end
+    return ok, ok and "SENT" or "ERROR"
+end
+
+local function getUpgradeState(track)
+    local config = HaystackConfig and HaystackConfig.UPGRADE_TRACKS and HaystackConfig.UPGRADE_TRACKS[track]
+    if type(config) ~= "table" or type(config.Levels) ~= "table" then return nil end
+    local maxLevel = #config.Levels
+    local level = math.clamp(tonumber(LocalPlayer:GetAttribute("HayUpgrade" .. track)) or 1, 1, maxLevel)
+    local nextLevel = config.Levels[level + 1]
+    local cost = nextLevel and tonumber(nextLevel.Cost) or nil
+    if cost then
+        cost = cost * (tonumber(LocalPlayer:GetAttribute("UpgradeCostMultiplier")) or 1)
+        if string.sub(track, 1, 9) == "Pitchfork" then
+            cost = cost * (tonumber(LocalPlayer:GetAttribute("PitchforkUpgradeCostMultiplier")) or 1)
+        end
+        cost = math.round(cost * 100) / 100
+    end
+    local requiredTool = UpgradeToolRequirements[track]
+    return {
+        track = track,
+        displayName = tostring(config.DisplayName or track),
+        description = tostring(config.Description or ""),
+        level = level,
+        maxLevel = maxLevel,
+        cost = cost,
+        requiredTool = requiredTool,
+        available = not requiredTool or isToolOwned(requiredTool),
+    }
+end
+
+local function requestSessionUpgrade(track, manual)
+    if not Remotes.BuyUpgrade then return false, "REMOTE" end
+    local state = getUpgradeState(track)
+    if not state then return false, "CONFIG" end
+    if not state.available then
+        if manual then addLog("warn", "Compre " .. (BarnToolDisplayNames[state.requiredTool] or state.requiredTool) .. " antes desta melhoria.") end
+        return false, "LOCKED"
+    end
+    if not state.cost then
+        if manual then addLog("info", state.displayName .. " ja esta no nivel maximo.") end
+        return false, "MAX"
+    end
+    local pendingAt = PendingUpgradePurchases[track]
+    if pendingAt and os.clock() - pendingAt < 5 then return false, "PENDING" end
+    local cash = getCashBalance()
+    if cash < state.cost then
+        if manual then addLog("warn", string.format("Saldo insuficiente: %s custa %s; faltam %s.", state.displayName, formatCash(state.cost), formatCash(state.cost - cash))) end
+        return false, "CASH"
+    end
+    PendingUpgradePurchases[track] = os.clock()
+    local ok = pcall(function()
+        Remotes.BuyUpgrade:FireServer(track)
+    end)
+    if not ok then PendingUpgradePurchases[track] = nil end
+    if manual and ok then addLog("info", "Melhoria solicitada: " .. state.displayName .. " por " .. formatCash(state.cost) .. ".") end
+    return ok, ok and "SENT" or "ERROR"
+end
+
+if Remotes.ShopPurchaseResult then
+    local conn = Remotes.ShopPurchaseResult.OnClientEvent:Connect(function(success, itemId, reason)
+        PendingToolPurchases[itemId] = nil
+        local displayName = BarnToolDisplayNames[itemId] or tostring(itemId)
+        if success then
+            addLog("info", displayName .. " comprada com sucesso.")
+            if HubState.AutoEquipBestTool then
+                task.defer(function()
+                    local bestSlot = getBestAvailableToolSlot()
+                    equipToolSlot(bestSlot, true)
+                end)
+            end
+        elseif reason ~= "OWNED" then
+            local message = reason == "CASH" and "saldo insuficiente" or (reason == "GEMS" and "gemas insuficientes" or "compra indisponivel")
+            addLog("warn", "Falha ao comprar " .. displayName .. ": " .. message .. ".")
+        end
+    end)
+    table.insert(HubConnections, conn)
+end
+
+for toolId, attributes in pairs(ToolOwnershipAttributes) do
+    local ownershipAttribute = attributes[1]
+    if toolId ~= "Needle" and ownershipAttribute then
+        local capturedToolId = toolId
+        local capturedOwnershipAttribute = ownershipAttribute
+        local conn = LocalPlayer:GetAttributeChangedSignal(ownershipAttribute):Connect(function()
+            if LocalPlayer:GetAttribute(capturedOwnershipAttribute) == true then
+                PendingToolPurchases[capturedToolId] = nil
+                if HubState.AutoEquipBestTool then
+                    task.defer(function()
+                        local bestSlot = getBestAvailableToolSlot()
+                        equipToolSlot(bestSlot, true)
+                    end)
+                end
+            end
+        end)
+        table.insert(HubConnections, conn)
+    end
+end
+
+for _, track in ipairs(upgradeTracks) do
+    local capturedTrack = track
+    local conn = LocalPlayer:GetAttributeChangedSignal("HayUpgrade" .. capturedTrack):Connect(function()
+        PendingUpgradePurchases[capturedTrack] = nil
+    end)
+    table.insert(HubConnections, conn)
+end
+
+local autoBuyThread = task.spawn(function()
     while IsHubLoaded do
-        task.wait(2.0)
+        task.wait(1.5)
         if IS_GAMEPLAY then
-            -- 1. Auto Buy Barn Tools if enabled (free in-game hay currency)
-            if HubState.AutoBuyTools and Remotes.BuyShopItem then
+            -- Buy a single progression item per cycle. This prevents prompt/event spam.
+            if HubState.AutoBuyTools then
                 for _, toolName in ipairs(barnToolNames) do
-                    local attr = barnToolAttributes[toolName]
-                    if attr and LocalPlayer:GetAttribute(attr) ~= true then
-                        pcall(function()
-                            Remotes.BuyShopItem:FireServer(toolName)
-                        end)
-                        task.wait(0.12)
+                    if not isToolOwned(toolName) then
+                        requestBarnToolPurchase(toolName, false)
+                        break
                     end
                 end
             end
-            -- 2. Auto Buy Match Upgrades if enabled (free in-game hay currency)
-            if HubState.AutoBuyUpgrades and Remotes.BuyUpgrade then
+            if HubState.AutoBuyUpgrades then
                 for _, track in ipairs(upgradeTracks) do
-                    pcall(function()
-                        Remotes.BuyUpgrade:FireServer(track)
-                    end)
-                    task.wait(0.08)
+                    local state = getUpgradeState(track)
+                    if state and state.available and state.cost and getCashBalance() >= state.cost then
+                        local sent = requestSessionUpgrade(track, false)
+                        if sent then break end
+                    end
                 end
             end
         end
     end
 end)
+table.insert(HubThreads, autoBuyThread)
 
 -- 8.6 CAMERA 3RD PERSON & MOUSE FREEDOM CONTROLLER
 local function applyCameraAndMouse()
@@ -1594,6 +2033,7 @@ end
 -- 8.10 UNLOAD / DESTROY HUB
 local function unloadHub()
     addLog("warn", "Unloading Needle Hub completely...")
+    if stopVacuumAutomation then stopVacuumAutomation() end
     IsHubLoaded = false
 
     for _, thread in ipairs(HubThreads) do
@@ -1608,6 +2048,7 @@ local function unloadHub()
             end
         end)
     end
+    clearUIConnections()
 
     toggleFly(false)
 
@@ -1627,7 +2068,7 @@ local function unloadHub()
     addLog("info", "Needle Hub unloaded cleanly.")
 end
 
----- SECTION 9: USER INTERFACE (CYBER GLASS ADAPTIVE HUD v5.5 PRO)
+---- SECTION 9: USER INTERFACE (CYBER GLASS ADAPTIVE HUD v5.8 PRO)
 
 -- Helper: Smooth Tweening
 local function tweenGui(obj, props, duration, style, direction)
@@ -1651,7 +2092,7 @@ local function createFloatingToggleButton(toggleCallback)
 
     local floatBtn = Instance.new("TextButton")
     floatBtn.Name = "MenuToggle"
-    floatBtn.Size = UDim2.fromOffset(130, 36)
+    floatBtn.Size = UDim2.fromOffset(154, 42)
     floatBtn.Position = UDim2.new(0, 16, 0.45, 0)
     floatBtn.BackgroundColor3 = Color3.fromRGB(18, 20, 30)
     floatBtn.Text = ""
@@ -1659,7 +2100,7 @@ local function createFloatingToggleButton(toggleCallback)
     floatBtn.Parent = floatGui
 
     local corner = Instance.new("UICorner")
-    corner.CornerRadius = UDim.new(0, 18)
+    corner.CornerRadius = UDim.new(0, 21)
     corner.Parent = floatBtn
 
     local stroke = Instance.new("UIStroke")
@@ -1694,7 +2135,7 @@ local function createFloatingToggleButton(toggleCallback)
     lbl.Text = "NEEDLE HUB"
     lbl.TextColor3 = Color3.fromRGB(240, 245, 255)
     lbl.Font = Enum.Font.GothamBold
-    lbl.TextSize = 11
+    lbl.TextSize = 13
     lbl.TextXAlignment = Enum.TextXAlignment.Left
     lbl.Parent = floatBtn
 
@@ -1725,7 +2166,7 @@ local function createFloatingToggleButton(toggleCallback)
             dragging = false
         end
     end)
-    table.insert(HubConnections, dragEndConn)
+    trackUIConnection(dragEndConn)
 
     local dragMoveConn = UserInputService.InputChanged:Connect(function(input)
         if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
@@ -1733,7 +2174,7 @@ local function createFloatingToggleButton(toggleCallback)
             floatBtn.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
         end
     end)
-    table.insert(HubConnections, dragMoveConn)
+    trackUIConnection(dragMoveConn)
 
     floatBtn.MouseButton1Click:Connect(toggleCallback)
 end
@@ -1778,6 +2219,7 @@ local function buildNativeUI()
     local isLobbyMode = (CurrentContextMode == "Lobby")
     addLog("info", "Construindo UI Cyber Glass (" .. (isLobbyMode and "MODO LOBBY" or "MODO JOGO") .. ")...")
 
+    clearUIConnections()
     if GlobalScreenGui then GlobalScreenGui:Destroy() end
 
     local screenGui = Instance.new("ScreenGui")
@@ -1788,11 +2230,12 @@ local function buildNativeUI()
     if not screenGui.Parent then screenGui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
     GlobalScreenGui = screenGui
 
-    -- Window Geometry (Compact & Adaptive for all resolutions)
-    local WIN_WIDTH = 550
-    local WIN_HEIGHT = 370
-    local TITLE_HEIGHT = 38
-    local SIDEBAR_WIDTH = 140
+    -- Comfortable desktop canvas, scaled down only when the viewport requires it.
+    local WIN_WIDTH = 800
+    local WIN_HEIGHT = 500
+    local TITLE_HEIGHT = 48
+    local SIDEBAR_WIDTH = 172
+    local windowScale = 1
 
     -- Main Window Frame
     local mainFrame = Instance.new("Frame")
@@ -1804,6 +2247,22 @@ local function buildNativeUI()
     mainFrame.BorderSizePixel = 0
     mainFrame.ClipsDescendants = true
     mainFrame.Parent = screenGui
+
+    local responsiveScale = Instance.new("UIScale")
+    responsiveScale.Name = "ResponsiveScale"
+    responsiveScale.Parent = mainFrame
+
+    local function updateResponsiveScale()
+        local camera = workspace.CurrentCamera
+        local viewport = camera and camera.ViewportSize or Vector2.new(1280, 720)
+        windowScale = math.clamp(math.min((viewport.X - 24) / WIN_WIDTH, (viewport.Y - 24) / WIN_HEIGHT), 0.55, 1)
+        responsiveScale.Scale = windowScale
+    end
+    updateResponsiveScale()
+
+    if workspace.CurrentCamera then
+        trackUIConnection(workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(updateResponsiveScale))
+    end
 
     local mainCorner = Instance.new("UICorner")
     mainCorner.CornerRadius = UDim.new(0, 10)
@@ -1853,8 +2312,8 @@ local function buildNativeUI()
 
     -- Logo Badge Icon
     local logoIcon = Instance.new("Frame")
-    logoIcon.Size = UDim2.fromOffset(24, 24)
-    logoIcon.Position = UDim2.new(0, 10, 0.5, -12)
+    logoIcon.Size = UDim2.fromOffset(28, 28)
+    logoIcon.Position = UDim2.new(0, 12, 0.5, -14)
     logoIcon.BackgroundColor3 = Color3.fromRGB(99, 102, 241)
     logoIcon.BorderSizePixel = 0
     logoIcon.Parent = titleBar
@@ -1871,25 +2330,25 @@ local function buildNativeUI()
     logoText.Text = "N"
     logoText.TextColor3 = Color3.fromRGB(255, 255, 255)
     logoText.Font = Enum.Font.GothamBold
-    logoText.TextSize = 13
+    logoText.TextSize = 15
     logoText.Parent = logoIcon
 
     -- Title Text
     local titleLabel = Instance.new("TextLabel")
-    titleLabel.Size = UDim2.fromOffset(95, 24)
-    titleLabel.Position = UDim2.new(0, 40, 0.5, -12)
+    titleLabel.Size = UDim2.fromOffset(120, 28)
+    titleLabel.Position = UDim2.new(0, 50, 0.5, -14)
     titleLabel.BackgroundTransparency = 1
     titleLabel.Text = "NEEDLE HUB"
     titleLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
     titleLabel.Font = Enum.Font.GothamBold
-    titleLabel.TextSize = 12
+    titleLabel.TextSize = 14
     titleLabel.TextXAlignment = Enum.TextXAlignment.Left
     titleLabel.Parent = titleBar
 
     -- Version Tag Pill
     local verPill = Instance.new("Frame")
-    verPill.Size = UDim2.fromOffset(60, 18)
-    verPill.Position = UDim2.new(0, 140, 0.5, -9)
+    verPill.Size = UDim2.fromOffset(66, 20)
+    verPill.Position = UDim2.new(0, 174, 0.5, -10)
     verPill.BackgroundColor3 = Color3.fromRGB(30, 34, 52)
     verPill.BorderSizePixel = 0
     verPill.Parent = titleBar
@@ -1901,13 +2360,13 @@ local function buildNativeUI()
     verLbl.Text = "v" .. tostring(SCRIPT_VERSION) .. " PRO"
     verLbl.TextColor3 = Color3.fromRGB(165, 180, 252)
     verLbl.Font = Enum.Font.GothamBold
-    verLbl.TextSize = 9
+    verLbl.TextSize = 10
     verLbl.Parent = verPill
 
     -- Status Pill (Match vs Lobby Context)
     local statusPill = Instance.new("Frame")
-    statusPill.Size = UDim2.fromOffset(105, 18)
-    statusPill.Position = UDim2.new(0, 206, 0.5, -9)
+    statusPill.Size = UDim2.fromOffset(112, 20)
+    statusPill.Position = UDim2.new(0, 248, 0.5, -10)
     statusPill.BackgroundColor3 = Color3.fromRGB(20, 26, 36)
     statusPill.BorderSizePixel = 0
     statusPill.Parent = titleBar
@@ -1926,19 +2385,47 @@ local function buildNativeUI()
     statusLbl.Text = (CurrentContextMode == "Match") and "MATCH MODE" or "LOBBY MODE"
     statusLbl.TextColor3 = Color3.fromRGB(200, 210, 230)
     statusLbl.Font = Enum.Font.GothamMedium
-    statusLbl.TextSize = 9
+    statusLbl.TextSize = 10
     statusLbl.TextXAlignment = Enum.TextXAlignment.Left
     statusLbl.Parent = statusPill
 
+    -- Live account balance; the authoritative replicated Data service is used.
+    local gemPill = Instance.new("Frame")
+    gemPill.Name = "GemBalance"
+    gemPill.Size = UDim2.fromOffset(112, 22)
+    gemPill.Position = UDim2.new(0, 370, 0.5, -11)
+    gemPill.BackgroundColor3 = Color3.fromRGB(12, 42, 32)
+    gemPill.BorderSizePixel = 0
+    gemPill.Parent = titleBar
+    local gemCorner = Instance.new("UICorner") gemCorner.CornerRadius = UDim.new(0, 11) gemCorner.Parent = gemPill
+    local gemStroke = Instance.new("UIStroke") gemStroke.Color = Color3.fromRGB(16, 185, 129) gemStroke.Thickness = 1 gemStroke.Parent = gemPill
+    local gemLabel = Instance.new("TextLabel")
+    gemLabel.Size = UDim2.new(1, -14, 1, 0)
+    gemLabel.Position = UDim2.fromOffset(7, 0)
+    gemLabel.BackgroundTransparency = 1
+    gemLabel.Text = "GEMAS  " .. formatNumber(getGemBalance())
+    gemLabel.TextColor3 = Color3.fromRGB(110, 231, 183)
+    gemLabel.Font = Enum.Font.GothamBold
+    gemLabel.TextSize = 11
+    gemLabel.TextXAlignment = Enum.TextXAlignment.Center
+    gemLabel.Parent = gemPill
+
+    task.spawn(function()
+        while IsHubLoaded and screenGui.Parent and gemLabel.Parent do
+            gemLabel.Text = "GEMAS  " .. formatNumber(getGemBalance())
+            task.wait(0.5)
+        end
+    end)
+
     -- Re-center / Reset Position Button
     local centerBtn = Instance.new("TextButton")
-    centerBtn.Size = UDim2.fromOffset(24, 24)
-    centerBtn.Position = UDim2.new(1, -86, 0.5, -12)
+    centerBtn.Size = UDim2.fromOffset(30, 30)
+    centerBtn.Position = UDim2.new(1, -112, 0.5, -15)
     centerBtn.BackgroundColor3 = Color3.fromRGB(28, 31, 46)
     centerBtn.Text = "O"
     centerBtn.TextColor3 = Color3.fromRGB(165, 180, 252)
     centerBtn.Font = Enum.Font.GothamBold
-    centerBtn.TextSize = 11
+    centerBtn.TextSize = 13
     centerBtn.AutoButtonColor = false
     centerBtn.Parent = titleBar
     local ccCorner = Instance.new("UICorner") ccCorner.CornerRadius = UDim.new(0, 6) ccCorner.Parent = centerBtn
@@ -1950,26 +2437,26 @@ local function buildNativeUI()
     -- Minimize Button
     local isMinimized = false
     local minBtn = Instance.new("TextButton")
-    minBtn.Size = UDim2.fromOffset(24, 24)
-    minBtn.Position = UDim2.new(1, -58, 0.5, -12)
+    minBtn.Size = UDim2.fromOffset(30, 30)
+    minBtn.Position = UDim2.new(1, -76, 0.5, -15)
     minBtn.BackgroundColor3 = Color3.fromRGB(28, 31, 46)
     minBtn.Text = "-"
     minBtn.TextColor3 = Color3.fromRGB(220, 225, 240)
     minBtn.Font = Enum.Font.GothamBold
-    minBtn.TextSize = 13
+    minBtn.TextSize = 15
     minBtn.AutoButtonColor = false
     minBtn.Parent = titleBar
     local minCorner = Instance.new("UICorner") minCorner.CornerRadius = UDim.new(0, 6) minCorner.Parent = minBtn
 
     -- Close Button
     local closeBtn = Instance.new("TextButton")
-    closeBtn.Size = UDim2.fromOffset(24, 24)
-    closeBtn.Position = UDim2.new(1, -30, 0.5, -12)
+    closeBtn.Size = UDim2.fromOffset(30, 30)
+    closeBtn.Position = UDim2.new(1, -40, 0.5, -15)
     closeBtn.BackgroundColor3 = Color3.fromRGB(38, 22, 28)
     closeBtn.Text = "X"
     closeBtn.TextColor3 = Color3.fromRGB(255, 120, 130)
     closeBtn.Font = Enum.Font.GothamBold
-    closeBtn.TextSize = 11
+    closeBtn.TextSize = 13
     closeBtn.AutoButtonColor = false
     closeBtn.Parent = titleBar
     local closeCorner = Instance.new("UICorner") closeCorner.CornerRadius = UDim.new(0, 6) closeCorner.Parent = closeBtn
@@ -2014,15 +2501,15 @@ local function buildNativeUI()
             isDraggingMain = false
         end
     end)
-    table.insert(HubConnections, dragTitleEnd)
+    trackUIConnection(dragTitleEnd)
 
     local dragTitleMove = UserInputService.InputChanged:Connect(function(input)
         if isDraggingMain and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
             local delta = input.Position - dragStartPos
             local cam = workspace.CurrentCamera
             local vp = cam and cam.ViewportSize or Vector2.new(1024, 600)
-            local halfW = WIN_WIDTH / 2
-            local halfH = WIN_HEIGHT / 2
+            local halfW = (WIN_WIDTH * windowScale) / 2
+            local halfH = ((isMinimized and TITLE_HEIGHT or WIN_HEIGHT) * windowScale) / 2
             
             local rawCenterX = (vp.X * frameStartPos.X.Scale) + frameStartPos.X.Offset + delta.X
             local rawCenterY = (vp.Y * frameStartPos.Y.Scale) + frameStartPos.Y.Offset + delta.Y
@@ -2037,7 +2524,7 @@ local function buildNativeUI()
             mainFrame.Position = UDim2.new(0.5, finalOffsetX, 0.5, finalOffsetY)
         end
     end)
-    table.insert(HubConnections, dragTitleMove)
+    trackUIConnection(dragTitleMove)
 
     -- Sidebar for Tabs
     local sidebar = Instance.new("Frame")
@@ -2058,13 +2545,13 @@ local function buildNativeUI()
     sidebarSep.Parent = bodyContainer
 
     local sidebarLayout = Instance.new("UIListLayout")
-    sidebarLayout.Padding = UDim.new(0, 4)
+    sidebarLayout.Padding = UDim.new(0, 6)
     sidebarLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
     sidebarLayout.SortOrder = Enum.SortOrder.LayoutOrder
     sidebarLayout.Parent = sidebar
 
     local sidebarPadding = Instance.new("UIPadding")
-    sidebarPadding.PaddingTop = UDim.new(0, 8)
+    sidebarPadding.PaddingTop = UDim.new(0, 12)
     sidebarPadding.Parent = sidebar
 
     -- Content Area
@@ -2079,8 +2566,11 @@ local function buildNativeUI()
     local tabButtons = {}
     local tabIndicators = {}
     local tabOrderCounter = 0
+    local activeTabName = nil
+    local applyTabFilter = nil
 
     local function selectTab(tabName)
+        activeTabName = tabName
         for name, frame in pairs(tabFrames) do
             local isTarget = (name == tabName)
             frame.Visible = isTarget
@@ -2098,18 +2588,19 @@ local function buildNativeUI()
                 if ind then ind.Visible = false end
             end
         end
+        if applyTabFilter then applyTabFilter() end
     end
 
     local function createTab(tabName, badgeTag)
         tabOrderCounter = tabOrderCounter + 1
         local btn = Instance.new("TextButton")
         btn.Name = "TabBtn_" .. tabName
-        btn.Size = UDim2.new(0.92, 0, 0, 32)
+        btn.Size = UDim2.new(0.9, 0, 0, 40)
         btn.BackgroundColor3 = Color3.fromRGB(20, 22, 32)
         btn.Text = "  " .. tabName
         btn.TextColor3 = Color3.fromRGB(155, 160, 180)
         btn.Font = Enum.Font.GothamBold
-        btn.TextSize = 10
+        btn.TextSize = 12
         btn.TextXAlignment = Enum.TextXAlignment.Left
         btn.AutoButtonColor = false
         btn.LayoutOrder = tabOrderCounter
@@ -2138,7 +2629,7 @@ local function buildNativeUI()
             b.Text = badgeTag
             b.TextColor3 = Color3.fromRGB(130, 140, 175)
             b.Font = Enum.Font.GothamMedium
-            b.TextSize = 9
+            b.TextSize = 10
             b.TextXAlignment = Enum.TextXAlignment.Right
             b.Parent = btn
         end
@@ -2156,25 +2647,25 @@ local function buildNativeUI()
 
         local scroll = Instance.new("ScrollingFrame")
         scroll.Name = "TabContent_" .. tabName
-        scroll.Size = UDim2.new(1, -16, 1, -12)
-        scroll.Position = UDim2.fromOffset(8, 6)
+        scroll.Size = UDim2.new(1, -24, 1, -20)
+        scroll.Position = UDim2.fromOffset(12, 10)
         scroll.BackgroundTransparency = 1
         scroll.BorderSizePixel = 0
-        scroll.ScrollBarThickness = 4
+        scroll.ScrollBarThickness = 6
         scroll.ScrollBarImageColor3 = Color3.fromRGB(80, 85, 120)
         scroll.CanvasPosition = Vector2.new(0, 0)
         scroll.Visible = false
         scroll.Parent = contentArea
 
         local list = Instance.new("UIListLayout")
-        list.Padding = UDim.new(0, 6)
+        list.Padding = UDim.new(0, 9)
         list.HorizontalAlignment = Enum.HorizontalAlignment.Center
         list.SortOrder = Enum.SortOrder.LayoutOrder
         list.Parent = scroll
 
         local pad = Instance.new("UIPadding")
-        pad.PaddingTop = UDim.new(0, 4)
-        pad.PaddingBottom = UDim.new(0, 12)
+        pad.PaddingTop = UDim.new(0, 6)
+        pad.PaddingBottom = UDim.new(0, 18)
         pad.Parent = scroll
 
         list:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
@@ -2192,10 +2683,53 @@ local function buildNativeUI()
         return scroll
     end
 
+    -- Global filter keeps dense tabs usable without adding more navigation layers.
+    local searchBox = Instance.new("TextBox")
+    searchBox.Name = "OptionSearch"
+    searchBox.Size = UDim2.fromOffset(176, 30)
+    searchBox.Position = UDim2.new(1, -300, 0.5, -15)
+    searchBox.BackgroundColor3 = Color3.fromRGB(14, 16, 24)
+    searchBox.BorderSizePixel = 0
+    searchBox.Text = ""
+    searchBox.PlaceholderText = "Buscar nesta aba..."
+    searchBox.TextColor3 = Color3.fromRGB(235, 240, 250)
+    searchBox.PlaceholderColor3 = Color3.fromRGB(120, 128, 150)
+    searchBox.Font = Enum.Font.GothamMedium
+    searchBox.TextSize = 11
+    searchBox.ClearTextOnFocus = false
+    searchBox.Parent = titleBar
+    local searchCorner = Instance.new("UICorner") searchCorner.CornerRadius = UDim.new(0, 7) searchCorner.Parent = searchBox
+    local searchStroke = Instance.new("UIStroke") searchStroke.Color = Color3.fromRGB(45, 49, 68) searchStroke.Thickness = 1 searchStroke.Parent = searchBox
+
+    local function getSearchableText(guiObject)
+        local parts = {}
+        if guiObject:IsA("TextLabel") or guiObject:IsA("TextButton") or guiObject:IsA("TextBox") then
+            table.insert(parts, guiObject.Text)
+        end
+        for _, descendant in ipairs(guiObject:GetDescendants()) do
+            if descendant:IsA("TextLabel") or descendant:IsA("TextButton") or descendant:IsA("TextBox") then
+                table.insert(parts, descendant.Text)
+            end
+        end
+        return string.lower(table.concat(parts, " "))
+    end
+
+    applyTabFilter = function()
+        local activeFrame = activeTabName and tabFrames[activeTabName]
+        if not activeFrame then return end
+        local query = string.lower(searchBox.Text):match("^%s*(.-)%s*$") or ""
+        for _, child in ipairs(activeFrame:GetChildren()) do
+            if child:IsA("GuiObject") then
+                child.Visible = query == "" or string.find(getSearchableText(child), query, 1, true) ~= nil
+            end
+        end
+    end
+    trackUIConnection(searchBox:GetPropertyChangedSignal("Text"):Connect(applyTabFilter))
+
     -- UI Component: Section Header (Context-Colored)
     local function addNativeSection(parent, title, customAccentColor)
         local frame = Instance.new("Frame")
-        frame.Size = UDim2.new(0.96, 0, 0, 22)
+        frame.Size = UDim2.new(0.98, 0, 0, 30)
         frame.BackgroundTransparency = 1
         frame.Parent = parent
 
@@ -2216,13 +2750,13 @@ local function buildNativeUI()
         lbl.Text = string.upper(title)
         lbl.TextColor3 = accent
         lbl.Font = Enum.Font.GothamBold
-        lbl.TextSize = 10
+        lbl.TextSize = 12
         lbl.TextXAlignment = Enum.TextXAlignment.Left
         lbl.Parent = frame
 
         local line = Instance.new("Frame")
-        line.Size = UDim2.new(1, -130, 0, 1)
-        line.Position = UDim2.new(0, 120, 0.5, 0)
+        line.Size = UDim2.fromOffset(48, 1)
+        line.Position = UDim2.new(1, -52, 0.5, 0)
         line.BackgroundColor3 = Color3.fromRGB(38, 41, 58)
         line.BorderSizePixel = 0
         line.Parent = frame
@@ -2231,7 +2765,7 @@ local function buildNativeUI()
     -- UI Component: Animated Switch Toggle
     local function addNativeToggle(parent, title, default, callback)
         local frame = Instance.new("Frame")
-        frame.Size = UDim2.new(0.96, 0, 0, 34)
+        frame.Size = UDim2.new(0.98, 0, 0, 44)
         frame.BackgroundColor3 = Color3.fromRGB(20, 22, 32)
         frame.BorderSizePixel = 0
         frame.Parent = parent
@@ -2244,20 +2778,21 @@ local function buildNativeUI()
         s.Parent = frame
 
         local lbl = Instance.new("TextLabel")
-        lbl.Size = UDim2.new(1, -60, 1, 0)
-        lbl.Position = UDim2.fromOffset(12, 0)
+        lbl.Size = UDim2.new(1, -76, 1, 0)
+        lbl.Position = UDim2.fromOffset(14, 0)
         lbl.BackgroundTransparency = 1
         lbl.Text = title
         lbl.TextColor3 = Color3.fromRGB(230, 235, 245)
         lbl.Font = Enum.Font.GothamMedium
-        lbl.TextSize = 11
+        lbl.TextSize = 13
+        lbl.TextWrapped = true
         lbl.TextXAlignment = Enum.TextXAlignment.Left
         lbl.Parent = frame
 
         -- Switch Pill Track
         local track = Instance.new("TextButton")
-        track.Size = UDim2.fromOffset(40, 20)
-        track.Position = UDim2.new(1, -48, 0.5, -10)
+        track.Size = UDim2.fromOffset(46, 24)
+        track.Position = UDim2.new(1, -58, 0.5, -12)
         track.BackgroundColor3 = default and Color3.fromRGB(79, 70, 229) or Color3.fromRGB(34, 37, 52)
         track.Text = ""
         track.AutoButtonColor = false
@@ -2268,8 +2803,8 @@ local function buildNativeUI()
 
         -- Thumb knob
         local thumb = Instance.new("Frame")
-        thumb.Size = UDim2.fromOffset(14, 14)
-        thumb.Position = default and UDim2.new(1, -17, 0.5, -7) or UDim2.new(0, 3, 0.5, -7)
+        thumb.Size = UDim2.fromOffset(18, 18)
+        thumb.Position = default and UDim2.new(1, -21, 0.5, -9) or UDim2.new(0, 3, 0.5, -9)
         thumb.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
         thumb.BorderSizePixel = 0
         thumb.Parent = track
@@ -2280,10 +2815,10 @@ local function buildNativeUI()
             state = not state
             if state then
                 tweenGui(track, {BackgroundColor3 = Color3.fromRGB(79, 70, 229)}, 0.18)
-                tweenGui(thumb, {Position = UDim2.new(1, -17, 0.5, -7)}, 0.18)
+                tweenGui(thumb, {Position = UDim2.new(1, -21, 0.5, -9)}, 0.18)
             else
                 tweenGui(track, {BackgroundColor3 = Color3.fromRGB(34, 37, 52)}, 0.18)
-                tweenGui(thumb, {Position = UDim2.new(0, 3, 0.5, -7)}, 0.18)
+                tweenGui(thumb, {Position = UDim2.new(0, 3, 0.5, -9)}, 0.18)
             end
             callback(state)
         end
@@ -2295,10 +2830,11 @@ local function buildNativeUI()
     -- UI Component: Button (Supports Robux Gold, Gem Green, Primary Indigo)
     local function addNativeButton(parent, title, callback, isPrimary, buttonStyle)
         local btn = Instance.new("TextButton")
-        btn.Size = UDim2.new(0.96, 0, 0, 30)
+        btn.Size = UDim2.new(0.98, 0, 0, 40)
         btn.Text = title
         btn.Font = Enum.Font.GothamBold
-        btn.TextSize = 10
+        btn.TextSize = 12
+        btn.TextWrapped = true
         btn.AutoButtonColor = false
         btn.Parent = parent
 
@@ -2341,9 +2877,9 @@ local function buildNativeUI()
             tweenGui(btn, {BackgroundColor3 = bgCol}, 0.15)
         end)
         btn.MouseButton1Click:Connect(function()
-            tweenGui(btn, {Size = UDim2.new(0.94, 0, 0, 28)}, 0.08, Enum.EasingStyle.Sine, Enum.EasingDirection.Out)
+            tweenGui(btn, {Size = UDim2.new(0.96, 0, 0, 38)}, 0.08, Enum.EasingStyle.Sine, Enum.EasingDirection.Out)
             task.wait(0.08)
-            tweenGui(btn, {Size = UDim2.new(0.96, 0, 0, 30)}, 0.08, Enum.EasingStyle.Sine, Enum.EasingDirection.Out)
+            tweenGui(btn, {Size = UDim2.new(0.98, 0, 0, 40)}, 0.08, Enum.EasingStyle.Sine, Enum.EasingDirection.Out)
             callback()
         end)
         return btn
@@ -2352,7 +2888,7 @@ local function buildNativeUI()
     -- UI Component: Interactive Slider
     local function addNativeSlider(parent, title, min, max, default, callback)
         local frame = Instance.new("Frame")
-        frame.Size = UDim2.new(0.96, 0, 0, 42)
+        frame.Size = UDim2.new(0.98, 0, 0, 54)
         frame.BackgroundColor3 = Color3.fromRGB(20, 22, 32)
         frame.BorderSizePixel = 0
         frame.Parent = parent
@@ -2364,30 +2900,30 @@ local function buildNativeUI()
         s.Parent = frame
 
         local tLbl = Instance.new("TextLabel")
-        tLbl.Size = UDim2.new(1, -60, 0, 18)
-        tLbl.Position = UDim2.fromOffset(12, 4)
+        tLbl.Size = UDim2.new(1, -72, 0, 22)
+        tLbl.Position = UDim2.fromOffset(14, 5)
         tLbl.BackgroundTransparency = 1
         tLbl.Text = title
         tLbl.TextColor3 = Color3.fromRGB(220, 225, 240)
         tLbl.Font = Enum.Font.GothamMedium
-        tLbl.TextSize = 10
+        tLbl.TextSize = 12
         tLbl.TextXAlignment = Enum.TextXAlignment.Left
         tLbl.Parent = frame
 
         local valLbl = Instance.new("TextLabel")
-        valLbl.Size = UDim2.fromOffset(45, 18)
-        valLbl.Position = UDim2.new(1, -55, 0, 4)
+        valLbl.Size = UDim2.fromOffset(52, 22)
+        valLbl.Position = UDim2.new(1, -66, 0, 5)
         valLbl.BackgroundTransparency = 1
         valLbl.Text = tostring(default)
         valLbl.TextColor3 = Color3.fromRGB(129, 140, 248)
         valLbl.Font = Enum.Font.GothamBold
-        valLbl.TextSize = 10
+        valLbl.TextSize = 12
         valLbl.TextXAlignment = Enum.TextXAlignment.Right
         valLbl.Parent = frame
 
         local barBg = Instance.new("TextButton")
         barBg.Size = UDim2.new(1, -24, 0, 8)
-        barBg.Position = UDim2.fromOffset(12, 26)
+        barBg.Position = UDim2.fromOffset(12, 37)
         barBg.BackgroundColor3 = Color3.fromRGB(32, 35, 50)
         barBg.Text = ""
         barBg.AutoButtonColor = false
@@ -2417,22 +2953,22 @@ local function buildNativeUI()
                 updateVal(input)
             end
         end)
-        UserInputService.InputEnded:Connect(function(input)
+        trackUIConnection(UserInputService.InputEnded:Connect(function(input)
             if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
                 isDraggingSlider = false
             end
-        end)
-        UserInputService.InputChanged:Connect(function(input)
+        end))
+        trackUIConnection(UserInputService.InputChanged:Connect(function(input)
             if isDraggingSlider and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
                 updateVal(input)
             end
-        end)
+        end))
     end
 
     -- UI Component: Modern Info / Status Card (Context-Colored)
     local function addNativeParagraph(parent, title, content, customAccentColor)
         local frame = Instance.new("Frame")
-        frame.Size = UDim2.new(0.96, 0, 0, 52)
+        frame.Size = UDim2.new(0.98, 0, 0, 68)
         frame.BackgroundColor3 = Color3.fromRGB(20, 22, 32)
         frame.BorderSizePixel = 0
         frame.Parent = parent
@@ -2454,24 +2990,24 @@ local function buildNativeUI()
         local ac = Instance.new("UICorner") ac.CornerRadius = UDim.new(1, 0) ac.Parent = accent
 
         local tLbl = Instance.new("TextLabel")
-        tLbl.Size = UDim2.new(1, -24, 0, 18)
-        tLbl.Position = UDim2.fromOffset(12, 4)
+        tLbl.Size = UDim2.new(1, -30, 0, 22)
+        tLbl.Position = UDim2.fromOffset(15, 7)
         tLbl.BackgroundTransparency = 1
         tLbl.Text = title
         tLbl.TextColor3 = accentCol
         tLbl.Font = Enum.Font.GothamBold
-        tLbl.TextSize = 10
+        tLbl.TextSize = 12
         tLbl.TextXAlignment = Enum.TextXAlignment.Left
         tLbl.Parent = frame
 
         local cLbl = Instance.new("TextLabel")
-        cLbl.Size = UDim2.new(1, -24, 0, 26)
-        cLbl.Position = UDim2.fromOffset(12, 22)
+        cLbl.Size = UDim2.new(1, -30, 0, 32)
+        cLbl.Position = UDim2.fromOffset(15, 31)
         cLbl.BackgroundTransparency = 1
         cLbl.Text = content
         cLbl.TextColor3 = Color3.fromRGB(205, 210, 225)
         cLbl.Font = Enum.Font.Gotham
-        cLbl.TextSize = 10
+        cLbl.TextSize = 12
         cLbl.TextWrapped = true
         cLbl.TextXAlignment = Enum.TextXAlignment.Left
         cLbl.TextYAlignment = Enum.TextYAlignment.Top
@@ -2483,7 +3019,7 @@ local function buildNativeUI()
     -- UI Component: Modern Text Input Box with Action Button
     local function addNativeInput(parent, placeholder, btnText, callback)
         local frame = Instance.new("Frame")
-        frame.Size = UDim2.new(0.96, 0, 0, 36)
+        frame.Size = UDim2.new(0.98, 0, 0, 48)
         frame.BackgroundColor3 = Color3.fromRGB(20, 22, 32)
         frame.BorderSizePixel = 0
         frame.Parent = parent
@@ -2495,29 +3031,29 @@ local function buildNativeUI()
         s.Parent = frame
 
         local textBox = Instance.new("TextBox")
-        textBox.Size = UDim2.new(1, -80, 1, -8)
-        textBox.Position = UDim2.fromOffset(8, 4)
+        textBox.Size = UDim2.new(1, -112, 1, -12)
+        textBox.Position = UDim2.fromOffset(8, 6)
         textBox.BackgroundColor3 = Color3.fromRGB(14, 16, 24)
         textBox.Text = ""
         textBox.PlaceholderText = placeholder
         textBox.TextColor3 = Color3.fromRGB(240, 245, 255)
         textBox.PlaceholderColor3 = Color3.fromRGB(120, 125, 145)
         textBox.Font = Enum.Font.GothamMedium
-        textBox.TextSize = 10
+        textBox.TextSize = 12
         textBox.TextXAlignment = Enum.TextXAlignment.Left
         textBox.ClearTextOnFocus = false
-        textBox.Active = false
+        textBox.Active = true
         textBox.Parent = frame
         local tbc = Instance.new("UICorner") tbc.CornerRadius = UDim.new(0, 4) tbc.Parent = textBox
 
         local btn = Instance.new("TextButton")
-        btn.Size = UDim2.fromOffset(60, 26)
-        btn.Position = UDim2.new(1, -66, 0.5, -13)
+        btn.Size = UDim2.fromOffset(88, 34)
+        btn.Position = UDim2.new(1, -96, 0.5, -17)
         btn.BackgroundColor3 = Color3.fromRGB(79, 70, 229)
         btn.Text = btnText or "Submit"
         btn.TextColor3 = Color3.fromRGB(255, 255, 255)
         btn.Font = Enum.Font.GothamBold
-        btn.TextSize = 10
+        btn.TextSize = 12
         btn.AutoButtonColor = false
         btn.Parent = frame
         local bc = Instance.new("UICorner") bc.CornerRadius = UDim.new(0, 4) bc.Parent = btn
@@ -2535,37 +3071,37 @@ local function buildNativeUI()
         -- ==================================================================
         -- LOBBY MODE (ONLY LOBBY FEATURES SHOWN)
         -- ==================================================================
-        local lobbyTab = createTab("Lobby Hub", "HUB")
-        local lobbyShopTab = createTab("Lobby Shop", "SHOP")
+        local lobbyTab = createTab("Inicio", "HUB")
+        local lobbyShopTab = createTab("Loja", "SHOP")
         local codesTab = createTab("Codigos", "CODE")
-        local playerTab = createTab("Player", "HERO")
-        local warpTab = createTab("Match Warp", "WARP")
-        local consoleTab = createTab("Console", "LOGS")
-        local setTab = createTab("Settings", "CFG")
+        local playerTab = createTab("Jogador", "HERO")
+        local warpTab = createTab("Partidas", "WARP")
+        local consoleTab = createTab("Atividade", "LOGS")
+        local setTab = createTab("Ajustes", "CFG")
 
         -- 1. Lobby Hub Tab
-        addNativeSection(lobbyTab, "Class System & Spins", Color3.fromRGB(99, 102, 241))
-        local classStatusCard = addNativeParagraph(lobbyTab, "Active Class & Gems",
-            string.format("Class: [%s] | Gems: %s | Target: [%s]",
-                tostring(LocalPlayer:GetAttribute("ActiveClass") or "Starter"),
-                tostring(LocalPlayer:GetAttribute("Gems") or 0),
+        addNativeSection(lobbyTab, "Classes e giros", Color3.fromRGB(99, 102, 241))
+        local classStatusCard = addNativeParagraph(lobbyTab, "Resumo da conta",
+            string.format("Classe: %s   |   Gemas: %s   |   Alvo: %s",
+                getActiveClass(),
+                formatNumber(getGemBalance()),
                 HubState.TargetClass), Color3.fromRGB(99, 102, 241))
 
         task.spawn(function()
-            while IsHubLoaded do
+            while IsHubLoaded and classStatusCard and classStatusCard.Parent do
                 task.wait(1.5)
                 pcall(function()
                     if classStatusCard and classStatusCard.Parent then
-                        classStatusCard.Text = string.format("Class: [%s] | Gems: %s | Target: [%s]",
-                            tostring(LocalPlayer:GetAttribute("ActiveClass") or "Starter"),
-                            tostring(LocalPlayer:GetAttribute("Gems") or 0),
+                        classStatusCard.Text = string.format("Classe: %s   |   Gemas: %s   |   Alvo: %s",
+                            getActiveClass(),
+                            formatNumber(getGemBalance()),
                             HubState.TargetClass)
                     end
                 end)
             end
         end)
 
-        addNativeToggle(lobbyTab, "Auto-Roll Class (Stops on Target)", HubState.AutoRollClass, function(val)
+        addNativeToggle(lobbyTab, "Girar classes ate encontrar o alvo", HubState.AutoRollClass, function(val)
             HubState.AutoRollClass = val
             addLog("info", "Auto-Roll Class: " .. tostring(val))
             if val then
@@ -2573,14 +3109,15 @@ local function buildNativeUI()
                     while IsHubLoaded and HubState.AutoRollClass do
                         task.wait(0.6)
                         if Remotes.RollClass and IS_LOBBY then
-                            local gems = LocalPlayer:GetAttribute("Gems") or 0
+                            local gems = getGemBalance()
                             if gems < 40 then
                                 HubState.AutoRollClass = false
                                 addLog("warn", "Gemas insuficientes para rolar classe (Gemas: " .. gems .. " / 40). Auto-Roll pausado.")
                                 break
                             end
                             local ok, res = pcall(function() return Remotes.RollClass:InvokeServer() end)
-                            local curClass = tostring(LocalPlayer:GetAttribute("ActiveClass") or res or "")
+                            local curClass = getActiveClass()
+                            if curClass == "Starter" and res then curClass = tostring(res) end
                             addLog("info", "Rerolled Class: " .. curClass)
                             if curClass:lower():find(HubState.TargetClass:lower()) then
                                 addLog("info", "CLASSE ALVO OBTIDA: " .. curClass .. "! Auto-Roll encerrado com sucesso.")
@@ -2597,16 +3134,16 @@ local function buildNativeUI()
             end
         end)
 
-        addNativeButton(lobbyTab, "Roll Class Once (Manual - 40 Gems)", function()
+        addNativeButton(lobbyTab, "Girar classe uma vez - 40 gemas", function()
             if Remotes.RollClass then
                 local s, res = pcall(function() return Remotes.RollClass:InvokeServer() end)
-                addLog("info", "Manual Class Roll Result: " .. tostring(res or LocalPlayer:GetAttribute("ActiveClass")))
+                addLog("info", "Manual Class Roll Result: " .. tostring(res or getActiveClass()))
             else
                 addLog("warn", "Remotes.RollClass nao encontrado!")
             end
         end)
 
-        addNativeSection(lobbyTab, "Target Class Quick-Pick", Color3.fromRGB(99, 102, 241))
+        addNativeSection(lobbyTab, "Escolher classe alvo", Color3.fromRGB(99, 102, 241))
         addNativeButton(lobbyTab, "Target: Ultimate Farmer (0.1% Mythic)", function()
             HubState.TargetClass = "Ultimate Farmer"
             addLog("info", "Target Class definida como: Ultimate Farmer")
@@ -2636,7 +3173,7 @@ local function buildNativeUI()
             addLog("info", "Target Class definida como: Pack Mule")
         end)
 
-        addNativeSection(lobbyTab, "Class Slots", Color3.fromRGB(99, 102, 241))
+        addNativeSection(lobbyTab, "Slots de classe", Color3.fromRGB(99, 102, 241))
         addNativeButton(lobbyTab, "Equip Class Slot 1", function()
             if Remotes.SelectClassSlot then
                 local s, res = pcall(function() return Remotes.SelectClassSlot:InvokeServer(1) end)
@@ -2656,7 +3193,7 @@ local function buildNativeUI()
             end
         end)
 
-        addNativeSection(lobbyTab, "Pets & Companions", Color3.fromRGB(99, 102, 241))
+        addNativeSection(lobbyTab, "Pets e companheiros", Color3.fromRGB(99, 102, 241))
         addNativeButton(lobbyTab, "Equip Cow Pet (Sells in Place + 120 Cap)", function()
             if Remotes.EquipPet then
                 local s, res = pcall(function() return Remotes.EquipPet:InvokeServer("Cow") end)
@@ -2674,7 +3211,7 @@ local function buildNativeUI()
             end
         end)
 
-        addNativeSection(lobbyTab, "Chests & Event Rewards", Color3.fromRGB(99, 102, 241))
+        addNativeSection(lobbyTab, "Baus e recompensas", Color3.fromRGB(99, 102, 241))
         addNativeButton(lobbyTab, "Open All Event Chests (Batch x10)", function()
             if Remotes.OpenChest then
                 addLog("info", "Iniciando abertura de baus de evento...")
@@ -2688,7 +3225,7 @@ local function buildNativeUI()
             end
         end)
 
-        addNativeSection(lobbyTab, "Lobby Navigation & Portals", Color3.fromRGB(99, 102, 241))
+        addNativeSection(lobbyTab, "Navegacao do lobby", Color3.fromRGB(99, 102, 241))
         addNativeButton(lobbyTab, "Teleport to Match Circle (Join Game)", function()
             local hrp = getHRP()
             if hrp then
@@ -2718,37 +3255,37 @@ local function buildNativeUI()
 
         -- 2. Lobby Shop Tab (Dedicated Store with Clear Separation)
         addNativeSection(lobbyShopTab, "Melhorias Permanentes (Moeda: Gemas)", Color3.fromRGB(52, 211, 153))
-        local lobbyGemsCard = addNativeParagraph(lobbyShopTab, "Gemas da Conta", "Gemas Atuais: " .. tostring(LocalPlayer:GetAttribute("Gems") or 0) .. " | Melhorias permanentes de conta.", Color3.fromRGB(52, 211, 153))
+        local lobbyGemsCard = addNativeParagraph(lobbyShopTab, "Gemas da Conta", "Saldo atual: " .. formatNumber(getGemBalance()) .. " gemas | Melhorias permanentes da conta.", Color3.fromRGB(52, 211, 153))
         task.spawn(function()
-            while IsHubLoaded do
+            while IsHubLoaded and lobbyGemsCard and lobbyGemsCard.Parent do
                 task.wait(1.5)
                 pcall(function()
                     if lobbyGemsCard and lobbyGemsCard.Parent then
-                        lobbyGemsCard.Text = "Gemas Atuais: " .. tostring(LocalPlayer:GetAttribute("Gems") or 0) .. " | Melhorias permanentes de conta."
+                        lobbyGemsCard.Text = "Saldo atual: " .. formatNumber(getGemBalance()) .. " gemas | Melhorias permanentes da conta."
                     end
                 end)
             end
         end)
         
-        addNativeButton(lobbyShopTab, "Upgrade Permanente: +5 Capacidade (ExtraHoldAmount)", function()
+        addNativeButton(lobbyShopTab, "+5 de capacidade da mochila", function()
             if Remotes.BuyUpgrade then
                 pcall(function() Remotes.BuyUpgrade:FireServer("ExtraHoldAmount") end)
                 addLog("info", "Comprado upgrade de Gemas: ExtraHoldAmount")
             end
         end, false, "gem")
-        addNativeButton(lobbyShopTab, "Upgrade Permanente: +1 Pegada (ExtraTakeAmount)", function()
+        addNativeButton(lobbyShopTab, "+1 feno por coleta", function()
             if Remotes.BuyUpgrade then
                 pcall(function() Remotes.BuyUpgrade:FireServer("ExtraTakeAmount") end)
                 addLog("info", "Comprado upgrade de Gemas: ExtraTakeAmount")
             end
         end, false, "gem")
-        addNativeButton(lobbyShopTab, "Upgrade Permanente: +1 Multiplicador de Gema (GemValue)", function()
+        addNativeButton(lobbyShopTab, "+1 gema por coleta", function()
             if Remotes.BuyUpgrade then
                 pcall(function() Remotes.BuyUpgrade:FireServer("GemValue") end)
                 addLog("info", "Comprado upgrade de Gemas: GemValue")
             end
         end, false, "gem")
-        addNativeButton(lobbyShopTab, "Upgrade Permanente: +10% Valor do Feno (ExtraHayValue)", function()
+        addNativeButton(lobbyShopTab, "+10% no valor do feno", function()
             if Remotes.BuyUpgrade then
                 pcall(function() Remotes.BuyUpgrade:FireServer("ExtraHayValuePercentage") end)
                 addLog("info", "Comprado upgrade de Gemas: ExtraHayValuePercentage")
@@ -2795,7 +3332,7 @@ local function buildNativeUI()
         addNativeSection(codesTab, "Status do Ultimo Resgate", Color3.fromRGB(56, 189, 248))
         local codeStatusCard = addNativeParagraph(codesTab, "Resposta do Servidor", LastCodeStatusMessage, Color3.fromRGB(56, 189, 248))
         task.spawn(function()
-            while IsHubLoaded do
+            while IsHubLoaded and codeStatusCard and codeStatusCard.Parent do
                 task.wait(0.5)
                 pcall(function()
                     if codeStatusCard and codeStatusCard.Parent then
@@ -2834,7 +3371,7 @@ local function buildNativeUI()
         end)
 
         -- 4. Match Warp Tab
-        addNativeSection(warpTab, "Direct Match Teleports", Color3.fromRGB(99, 102, 241))
+        addNativeSection(warpTab, "Entrar em uma partida", Color3.fromRGB(99, 102, 241))
         addNativeButton(warpTab, "Direct Teleport to Farmhouse Match (ID 108628039999641)", function()
             addLog("info", "Teleporting to Farmhouse Match...")
             TeleportService:Teleport(FARMHOUSE_PLACE_ID, LocalPlayer)
@@ -2844,7 +3381,7 @@ local function buildNativeUI()
             TeleportService:Teleport(BASEMENT_PLACE_ID, LocalPlayer)
         end)
 
-        addNativeSection(warpTab, "Server Routing", Color3.fromRGB(99, 102, 241))
+        addNativeSection(warpTab, "Servidor", Color3.fromRGB(99, 102, 241))
         addNativeButton(warpTab, "Server Hop (Find New Lobby)", function()
             addLog("info", "Searching for alternate Lobby server...")
             TeleportService:Teleport(LOBBY_PLACE_ID, LocalPlayer)
@@ -2854,24 +3391,31 @@ local function buildNativeUI()
         end)
 
         -- Default Lobby Tab Selection
-        selectTab("Lobby Hub")
+        selectTab("Inicio")
 
     else
         -- ==================================================================
         -- MATCH MODE (ONLY GAMEPLAY FARMING & COMBAT FEATURES SHOWN)
         -- ==================================================================
-        local farmTab = createTab("Auto Farm", "FARM")
-        local shopTab = createTab("Barn Shop", "SHOP")
-        local playerTab = createTab("Player", "HERO")
-        local teleTab = createTab("Teleport", "WARP")
-        local espTab = createTab("Visuals ESP", "ESP")
-        local consoleTab = createTab("Console", "LOGS")
-        local setTab = createTab("Settings", "CFG")
+        local farmTab = createTab("Automacao", "AUTO")
+        local shopTab = createTab("Loja", "SHOP")
+        local playerTab = createTab("Jogador", "HERO")
+        local teleTab = createTab("Viagem", "WARP")
+        local espTab = createTab("Destaques", "ESP")
+        local consoleTab = createTab("Atividade", "LOGS")
+        local setTab = createTab("Ajustes", "CFG")
 
         -- 1. Auto Farm Tab
-        addNativeSection(farmTab, "Harvest Automation", Color3.fromRGB(99, 102, 241))
-        addNativeToggle(farmTab, "Auto Collect Hay (Multi-Grab)", HubState.AutoFarmHay, function(val)
+        addNativeSection(farmTab, "Automacao da colheita", Color3.fromRGB(99, 102, 241))
+        addNativeToggle(farmTab, "Nao mover meu personagem", HubState.NoTeleportMode, function(val)
+            HubState.NoTeleportMode = val
+            if val then stopVacuumAutomation() end
+            addLog("info", "Modo sem teleporte: " .. tostring(val))
+        end)
+        addNativeParagraph(farmTab, "Como funciona sem teleporte", "Voce anda livremente. Feno e gemas sao coletados ao alcance; compras, upgrades e Drone continuam globais. A venda pode aguardar voce se aproximar e olhar para a vaca.", Color3.fromRGB(99, 102, 241))
+        addNativeToggle(farmTab, "Auto coletar feno ao alcance", HubState.AutoFarmHay, function(val)
             HubState.AutoFarmHay = val
+            if not val then stopVacuumAutomation() end
             addLog("info", "Auto Farm Hay: " .. tostring(val))
         end)
         addNativeToggle(farmTab, "Auto-Equip Best Tool (Vacuum/Pitchfork)", HubState.AutoEquipBestTool, function(val)
@@ -2886,22 +3430,22 @@ local function buildNativeUI()
             HubState.AutoUseTnt = val
             addLog("info", "Auto-Use TNT: " .. tostring(val))
         end)
-        addNativeSlider(farmTab, "Auto-TNT Interval (Seconds)", 8, 30, HubState.TntInterval, function(val)
+        addNativeSlider(farmTab, "Intervalo do TNT (segundos)", 8, 60, HubState.TntInterval, function(val)
             HubState.TntInterval = val
         end)
         addNativeToggle(farmTab, "Prioritize Rare / RGB / Void (20x Value)", HubState.PrioritizeRGB, function(val)
             HubState.PrioritizeRGB = val
             addLog("info", "Prioritize Rare Straws: " .. tostring(val))
         end)
-        addNativeToggle(farmTab, "Auto Collect Gems", HubState.AutoCollectGems, function(val)
+        addNativeToggle(farmTab, "Auto coletar gemas ao alcance", HubState.AutoCollectGems, function(val)
             HubState.AutoCollectGems = val
             addLog("info", "Auto Collect Gems: " .. tostring(val))
         end)
-        addNativeToggle(farmTab, "Auto Sell when Bag is Full", HubState.AutoSell, function(val)
+        addNativeToggle(farmTab, "Auto vender quando a bolsa encher", HubState.AutoSell, function(val)
             HubState.AutoSell = val
             addLog("info", "Auto Sell: " .. tostring(val))
         end)
-        addNativeToggle(farmTab, "Auto-Win Needle (Farmer Hand-In)", HubState.AutoWinNeedle, function(val)
+        addNativeToggle(farmTab, "Auto coletar/entregar Agulha ao alcance", HubState.AutoWinNeedle, function(val)
             HubState.AutoWinNeedle = val
             addLog("info", "Auto-Win Needle: " .. tostring(val))
         end)
@@ -2909,10 +3453,10 @@ local function buildNativeUI()
             HubState.AutoDeployDrone = val
         end)
 
-        addNativeSection(farmTab, "Tool Recognition Status", Color3.fromRGB(99, 102, 241))
-        local toolStatusLbl = addNativeParagraph(farmTab, "Dynamic Tool Recognition", getToolStatusSummary(), Color3.fromRGB(99, 102, 241))
+        addNativeSection(farmTab, "Ferramentas detectadas", Color3.fromRGB(99, 102, 241))
+        local toolStatusLbl = addNativeParagraph(farmTab, "Status das ferramentas", getToolStatusSummary(), Color3.fromRGB(99, 102, 241))
         task.spawn(function()
-            while IsHubLoaded do
+            while IsHubLoaded and toolStatusLbl and toolStatusLbl.Parent do
                 task.wait(1.2)
                 pcall(function()
                     if toolStatusLbl and toolStatusLbl.Parent then
@@ -2922,7 +3466,7 @@ local function buildNativeUI()
             end
         end)
 
-        addNativeSection(farmTab, "Manual Tool Overrides", Color3.fromRGB(99, 102, 241))
+        addNativeSection(farmTab, "Acoes manuais", Color3.fromRGB(99, 102, 241))
         addNativeButton(farmTab, "Auto-Select Best Available Tool", function()
             HubState.ForcedToolSlot = 0
             local bestSlot = getBestAvailableToolSlot()
@@ -2943,138 +3487,147 @@ local function buildNativeUI()
             end
         end, true)
         addNativeButton(farmTab, "Equip Vacuum (Slot 5)", function()
-            HubState.ForcedToolSlot = SLOT_VACUUM
-            equipToolSlot(SLOT_VACUUM)
+            if equipToolSlot(SLOT_VACUUM) then HubState.ForcedToolSlot = SLOT_VACUUM end
         end)
         addNativeButton(farmTab, "Equip Pitchfork (Slot 3)", function()
-            HubState.ForcedToolSlot = SLOT_PITCHFORK
-            equipToolSlot(SLOT_PITCHFORK)
+            if equipToolSlot(SLOT_PITCHFORK) then HubState.ForcedToolSlot = SLOT_PITCHFORK end
         end)
         addNativeButton(farmTab, "Equip TNT (Slot 2)", function()
-            HubState.ForcedToolSlot = SLOT_TNT
-            equipToolSlot(SLOT_TNT)
+            if equipToolSlot(SLOT_TNT) then HubState.ForcedToolSlot = SLOT_TNT end
         end)
         addNativeButton(farmTab, "Equip Hand (Slot 1)", function()
-            HubState.ForcedToolSlot = SLOT_HAND
-            equipToolSlot(SLOT_HAND)
+            if equipToolSlot(SLOT_HAND) then HubState.ForcedToolSlot = SLOT_HAND end
         end)
         addNativeButton(farmTab, "Deploy Drone Now (Slot 4)", function()
-            if Remotes.DeployDrone then
+            if not isToolOwned("Drone") then
+                addLog("warn", "O Drone ainda nao foi comprado.")
+            elseif Remotes.DeployDrone then
                 pcall(function() Remotes.DeployDrone:FireServer() end)
                 addLog("info", "Fired DeployDrone command")
             end
         end)
 
-        addNativeSection(farmTab, "Quick Actions", Color3.fromRGB(99, 102, 241))
-        addNativeButton(farmTab, "Sell Hay Now (Instant Teleport)", function()
-            teleportTo(Landmarks.SellCow)
-            task.wait(0.2)
+        addNativeSection(farmTab, "Acoes rapidas", Color3.fromRGB(99, 102, 241))
+        addNativeButton(farmTab, "Vender agora sem mover personagem", function()
+            stopVacuumAutomation()
             if Remotes.SellHay then Remotes.SellHay:FireServer() end
-            addLog("info", "Executed instant sell.")
+            addLog("info", "Venda solicitada sem teleporte. Se necessario, aproxime-se e olhe para a vaca.")
         end, true)
 
-        -- 2. Barn Shop Tab (Dedicated Store with Robux vs In-Game Separation)
-        addNativeSection(shopTab, "Ferramentas do Celeiro (Moeda: Hay / Feno)", Color3.fromRGB(99, 102, 241))
-        addNativeParagraph(shopTab, "Sobre as Ferramentas", "Compre ferramentas usando o Feno/Dinheiro da partida. Desbloqueia novas mecanicas de colheita.", Color3.fromRGB(99, 102, 241))
+        -- 2. Barn Shop Tab (live prices and ownership from the match)
+        addNativeSection(shopTab, "Ferramentas do Celeiro", Color3.fromRGB(99, 102, 241))
+        local matchCashCard = addNativeParagraph(shopTab, "Dinheiro da partida", formatCash(getCashBalance()) .. " disponivel | Precos lidos diretamente da loja do celeiro.", Color3.fromRGB(99, 102, 241))
+        addNativeParagraph(shopTab, "Compra automatica segura", "Segue a progressao Forquilha > TNT > Drone > Aspirador. Compra apenas um item por vez e somente quando houver saldo.", Color3.fromRGB(99, 102, 241))
         
         addNativeToggle(shopTab, "Auto Buy Barn Tools (Feno)", HubState.AutoBuyTools, function(val)
             HubState.AutoBuyTools = val
             addLog("info", "Auto-Buy Barn Tools: " .. tostring(val))
         end)
         
-        addNativeButton(shopTab, "Comprar Aspirador (Vacuum) - Moeda de Feno", function()
-            if Remotes.BuyShopItem then
-                pcall(function() Remotes.BuyShopItem:FireServer("Vacuum") end)
-                addLog("info", "Solicitada compra de: Vacuum")
-            end
-        end)
-        addNativeButton(shopTab, "Comprar Forquilha (Pitchfork) - Moeda de Feno", function()
-            if Remotes.BuyShopItem then
-                pcall(function() Remotes.BuyShopItem:FireServer("Pitchfork") end)
-                addLog("info", "Solicitada compra de: Pitchfork")
-            end
-        end)
-        addNativeButton(shopTab, "Comprar Dinamite (TNT) - Moeda de Feno", function()
-            if Remotes.BuyShopItem then
-                pcall(function() Remotes.BuyShopItem:FireServer("Tnt") end)
-                addLog("info", "Solicitada compra de: TNT")
-            end
-        end)
-        addNativeButton(shopTab, "Comprar Drone (Drone Agricola) - Moeda de Feno", function()
-            if Remotes.BuyShopItem then
-                pcall(function() Remotes.BuyShopItem:FireServer("Drone") end)
-                addLog("info", "Solicitada compra de: Drone")
-            end
-        end)
+        local toolPurchaseButtons = {}
+        for _, toolId in ipairs(barnToolNames) do
+            local capturedToolId = toolId
+            toolPurchaseButtons[capturedToolId] = addNativeButton(shopTab, "Carregando " .. (BarnToolDisplayNames[capturedToolId] or capturedToolId) .. "...", function()
+                requestBarnToolPurchase(capturedToolId, true)
+            end)
+        end
 
-        addNativeSection(shopTab, "Melhorias da Partida (Moeda: Hay / Feno)", Color3.fromRGB(99, 102, 241))
-        addNativeParagraph(shopTab, "Upgrades de Sessao", "Melhorias que duram a rodada atual. Custam o dinheiro ganho colhendo feno.", Color3.fromRGB(99, 102, 241))
+        addNativeSection(shopTab, "Melhorias da partida", Color3.fromRGB(99, 102, 241))
+        addNativeParagraph(shopTab, "Upgrades de sessao", "Mostra nivel e preco real. Opcoes de ferramentas ficam bloqueadas ate voce possuir o item correspondente.", Color3.fromRGB(99, 102, 241))
         
         addNativeToggle(shopTab, "Auto Buy Session Upgrades (Feno)", HubState.AutoBuyUpgrades, function(val)
             HubState.AutoBuyUpgrades = val
             addLog("info", "Auto-Buy Session Upgrades: " .. tostring(val))
         end)
         
-        addNativeButton(shopTab, "Upgrade: Capacidade da Mochila (Capacity)", function()
-            if Remotes.BuyUpgrade then pcall(function() Remotes.BuyUpgrade:FireServer("Capacity") end) end
-        end)
-        addNativeButton(shopTab, "Upgrade: Quantidade por Pegada (Grab)", function()
-            if Remotes.BuyUpgrade then pcall(function() Remotes.BuyUpgrade:FireServer("Grab") end) end
-        end)
-        addNativeButton(shopTab, "Upgrade: Velocidade de Coleta (Speed)", function()
-            if Remotes.BuyUpgrade then pcall(function() Remotes.BuyUpgrade:FireServer("Speed") end) end
-        end)
-        addNativeButton(shopTab, "Upgrade: Aspirador Potencia (VacuumPower)", function()
-            if Remotes.BuyUpgrade then pcall(function() Remotes.BuyUpgrade:FireServer("VacuumPower") end) end
-        end)
-        addNativeButton(shopTab, "Upgrade: Aspirador Resfriamento (VacuumCooling)", function()
-            if Remotes.BuyUpgrade then pcall(function() Remotes.BuyUpgrade:FireServer("VacuumCooling") end) end
-        end)
-        addNativeButton(shopTab, "Upgrade: TNT Sorte Arco-Iris (TntLuck)", function()
-            if Remotes.BuyUpgrade then pcall(function() Remotes.BuyUpgrade:FireServer("TntLuck") end) end
-        end)
-        addNativeButton(shopTab, "Upgrade: TNT Cooldown (TntCooldown)", function()
-            if Remotes.BuyUpgrade then pcall(function() Remotes.BuyUpgrade:FireServer("TntCooldown") end) end
-        end)
-        addNativeButton(shopTab, "Upgrade: Drone Capacidade (DroneCapacity)", function()
-            if Remotes.BuyUpgrade then pcall(function() Remotes.BuyUpgrade:FireServer("DroneCapacity") end) end
-        end)
-        addNativeButton(shopTab, "Upgrade: Drone Pegada (DroneGrab)", function()
-            if Remotes.BuyUpgrade then pcall(function() Remotes.BuyUpgrade:FireServer("DroneGrab") end) end
+        local UpgradeLabels = {
+            Capacity = "Mochila: capacidade", HandHold = "Mao: coleta continua", Speed = "Mao: velocidade", Grab = "Mao: quantidade",
+            PitchforkCooldown = "Forquilha: velocidade", PitchforkHold = "Forquilha: coleta continua", Pitchfork = "Forquilha: alcance",
+            TntLuck = "TNT: sorte arco-iris", TntCooldown = "TNT: velocidade", TntPower = "TNT: potencia",
+            DroneSpeed = "Drone: velocidade", DroneGrab = "Drone: quantidade", DroneCapacity = "Drone: capacidade",
+            VacuumPower = "Aspirador: potencia", VacuumCooling = "Aspirador: resfriamento", VacuumRuntime = "Aspirador: autonomia",
+        }
+        local upgradeButtons = {}
+        for _, track in ipairs(upgradeTracks) do
+            local capturedTrack = track
+            upgradeButtons[capturedTrack] = addNativeButton(shopTab, UpgradeLabels[capturedTrack] or capturedTrack, function()
+                requestSessionUpgrade(capturedTrack, true)
+            end)
+        end
+
+        task.spawn(function()
+            while IsHubLoaded and matchCashCard and matchCashCard.Parent do
+                task.wait(0.75)
+                pcall(function()
+                    matchCashCard.Text = formatCash(getCashBalance()) .. " disponivel | Precos lidos diretamente da loja do celeiro."
+                    for toolId, button in pairs(toolPurchaseButtons) do
+                        if button and button.Parent then
+                            local info = getBarnToolInfo(toolId)
+                            local name = info.displayName or BarnToolDisplayNames[toolId] or toolId
+                            if isToolOwned(toolId) then
+                                button.Text = "[COMPRADO] " .. name
+                            elseif PendingToolPurchases[toolId] and os.clock() - PendingToolPurchases[toolId] < 5 then
+                                button.Text = "Processando " .. name .. "..."
+                            elseif info.price then
+                                button.Text = "Comprar " .. name .. " - " .. formatCash(info.price)
+                            else
+                                button.Text = name .. " - preco carregando..."
+                            end
+                        end
+                    end
+                    for track, button in pairs(upgradeButtons) do
+                        if button and button.Parent then
+                            local state = getUpgradeState(track)
+                            local label = UpgradeLabels[track] or track
+                            if not state then
+                                button.Text = label .. " - dados carregando..."
+                            elseif not state.available then
+                                button.Text = label .. " - requer " .. (BarnToolDisplayNames[state.requiredTool] or state.requiredTool)
+                            elseif not state.cost then
+                                button.Text = "[MAXIMO] " .. label .. " - nivel " .. tostring(state.level)
+                            elseif PendingUpgradePurchases[track] and os.clock() - PendingUpgradePurchases[track] < 5 then
+                                button.Text = "Processando " .. label .. "..."
+                            else
+                                button.Text = string.format("%s - nivel %d/%d - %s", label, state.level, state.maxLevel, formatCash(state.cost))
+                            end
+                        end
+                    end
+                end)
+            end
         end)
 
         addNativeSection(shopTab, "Melhorias Permanentes (Moeda: Gemas)", Color3.fromRGB(52, 211, 153))
-        local matchGemsCard = addNativeParagraph(shopTab, "Gemas da Conta", "Gemas Atuais: " .. tostring(LocalPlayer:GetAttribute("Gems") or 0) .. " | Melhorias permanentes de conta.", Color3.fromRGB(52, 211, 153))
+        local matchGemsCard = addNativeParagraph(shopTab, "Gemas da Conta", "Saldo atual: " .. formatNumber(getGemBalance()) .. " gemas | Melhorias permanentes da conta.", Color3.fromRGB(52, 211, 153))
         task.spawn(function()
-            while IsHubLoaded do
+            while IsHubLoaded and matchGemsCard and matchGemsCard.Parent do
                 task.wait(1.5)
                 pcall(function()
                     if matchGemsCard and matchGemsCard.Parent then
-                        matchGemsCard.Text = "Gemas Atuais: " .. tostring(LocalPlayer:GetAttribute("Gems") or 0) .. " | Melhorias permanentes de conta."
+                        matchGemsCard.Text = "Saldo atual: " .. formatNumber(getGemBalance()) .. " gemas | Melhorias permanentes da conta."
                     end
                 end)
             end
         end)
         
-        addNativeButton(shopTab, "Upgrade Permanente: +5 Capacidade (ExtraHoldAmount)", function()
+        addNativeButton(shopTab, "+5 de capacidade da mochila", function()
             if Remotes.BuyUpgrade then
                 pcall(function() Remotes.BuyUpgrade:FireServer("ExtraHoldAmount") end)
                 addLog("info", "Comprado upgrade de Gemas: ExtraHoldAmount")
             end
         end, false, "gem")
-        addNativeButton(shopTab, "Upgrade Permanente: +1 Pegada (ExtraTakeAmount)", function()
+        addNativeButton(shopTab, "+1 feno por coleta", function()
             if Remotes.BuyUpgrade then
                 pcall(function() Remotes.BuyUpgrade:FireServer("ExtraTakeAmount") end)
                 addLog("info", "Comprado upgrade de Gemas: ExtraTakeAmount")
             end
         end, false, "gem")
-        addNativeButton(shopTab, "Upgrade Permanente: +1 Multiplicador de Gema (GemValue)", function()
+        addNativeButton(shopTab, "+1 gema por coleta", function()
             if Remotes.BuyUpgrade then
                 pcall(function() Remotes.BuyUpgrade:FireServer("GemValue") end)
                 addLog("info", "Comprado upgrade de Gemas: GemValue")
             end
         end, false, "gem")
-        addNativeButton(shopTab, "Upgrade Permanente: +10% Valor do Feno (ExtraHayValue)", function()
+        addNativeButton(shopTab, "+10% no valor do feno", function()
             if Remotes.BuyUpgrade then
                 pcall(function() Remotes.BuyUpgrade:FireServer("ExtraHayValuePercentage") end)
                 addLog("info", "Comprado upgrade de Gemas: ExtraHayValuePercentage")
@@ -3107,7 +3660,7 @@ local function buildNativeUI()
         addNativeParagraph(shopTab, "Codigos Promocionais", "O sistema de codigos funciona exclusivamente no LOBBY! Use a aba Teleport -> Return to Lobby para resgatar codigos.", Color3.fromRGB(156, 163, 175))
 
         -- 3. Teleport Tab
-        addNativeSection(teleTab, "Map Landmarks", Color3.fromRGB(99, 102, 241))
+        addNativeSection(teleTab, "Locais do mapa", Color3.fromRGB(99, 102, 241))
         addNativeButton(teleTab, "Teleport to Hay Mound", function()
             teleportTo(Landmarks.HayCenter)
             addLog("info", "Teleported to Hay Mound")
@@ -3133,7 +3686,7 @@ local function buildNativeUI()
             end
         end)
 
-        addNativeSection(teleTab, "Server Routing", Color3.fromRGB(99, 102, 241))
+        addNativeSection(teleTab, "Servidor", Color3.fromRGB(99, 102, 241))
         addNativeButton(teleTab, "Return to Lobby Server", function()
             if Remotes.ReturnToLobby then Remotes.ReturnToLobby:FireServer() end
             TeleportService:Teleport(LOBBY_PLACE_ID, LocalPlayer)
@@ -3143,7 +3696,7 @@ local function buildNativeUI()
         end)
 
         -- 4. Visuals ESP Tab
-        addNativeSection(espTab, "Visual ESP Trackers", Color3.fromRGB(99, 102, 241))
+        addNativeSection(espTab, "Destaques visuais", Color3.fromRGB(99, 102, 241))
         addNativeToggle(espTab, "Needle ESP (Bright Yellow)", HubState.NeedleESP, function(val) HubState.NeedleESP = val end)
         addNativeToggle(espTab, "Rare / RGB / Void Straw ESP (Magenta)", HubState.RgbESP, function(val) HubState.RgbESP = val end)
         addNativeToggle(espTab, "Gems ESP (Emerald Green)", HubState.GemESP, function(val) HubState.GemESP = val end)
@@ -3151,7 +3704,7 @@ local function buildNativeUI()
         addNativeToggle(espTab, "Player ESP (White)", HubState.PlayerESP, function(val) HubState.PlayerESP = val end)
 
         -- Default Match Tab Selection
-        selectTab("Auto Farm")
+        selectTab("Automacao")
     end
 
     -- ==================================================================
@@ -3159,7 +3712,7 @@ local function buildNativeUI()
     -- ==================================================================
 
     -- Common: Player Tab
-    local playerTab = tabFrames["Player"]
+    local playerTab = tabFrames["Jogador"]
     if playerTab then
         addNativeSection(playerTab, "Camera & Mouse Freedom")
         addNativeToggle(playerTab, "Unlock Camera (3rd Person)", HubState.UnlockCamera, function(val)
@@ -3215,15 +3768,15 @@ local function buildNativeUI()
     end
 
     -- Common: Console Tab
-    local consoleTab = tabFrames["Console"]
+    local consoleTab = tabFrames["Atividade"]
     if consoleTab then
-        addNativeSection(consoleTab, "Real-Time Activity Log")
+        addNativeSection(consoleTab, "Registro de atividade")
         local consoleBox = Instance.new("TextBox")
-        consoleBox.Size = UDim2.new(0.96, 0, 0, 220)
+        consoleBox.Size = UDim2.new(0.98, 0, 0, 280)
         consoleBox.BackgroundColor3 = Color3.fromRGB(12, 13, 19)
         consoleBox.TextColor3 = Color3.fromRGB(165, 243, 180)
         consoleBox.Font = Enum.Font.Code
-        consoleBox.TextSize = 10
+        consoleBox.TextSize = 12
         consoleBox.ClearTextOnFocus = false
         consoleBox.TextEditable = false
         consoleBox.TextXAlignment = Enum.TextXAlignment.Left
@@ -3236,7 +3789,7 @@ local function buildNativeUI()
         local cbStroke = Instance.new("UIStroke") cbStroke.Color = Color3.fromRGB(36, 40, 58) cbStroke.Thickness = 1 cbStroke.Parent = consoleBox
 
         local consoleRefreshThread = task.spawn(function()
-            while IsHubLoaded do
+            while IsHubLoaded and consoleBox and consoleBox.Parent do
                 task.wait(1)
                 pcall(function()
                     if consoleBox and consoleBox.Parent then
@@ -3253,7 +3806,7 @@ local function buildNativeUI()
             addLog("info", "Logs limpos.")
         end)
 
-        addNativeButton(consoleTab, "Dump Remote List (Imprimir Remotos no Log)", function()
+        addNativeButton(consoleTab, "Listar remotos detectados", function()
             addLog("info", "--- Lista de Remotos Detectados ---")
             for name, r in pairs(Remotes) do
                 if r then
@@ -3266,15 +3819,15 @@ local function buildNativeUI()
     end
 
     -- Common: Settings Tab
-    local setTab = tabFrames["Settings"]
+    local setTab = tabFrames["Ajustes"]
     if setTab then
-        addNativeSection(setTab, "Game & Script Update Watcher")
+        addNativeSection(setTab, "Atualizacoes")
 
-        local gameWatcherCard = addNativeParagraph(setTab, "Live Game Watcher",
+        local gameWatcherCard = addNativeParagraph(setTab, "Versao do jogo",
             string.format("Place: %s | PlaceId: %s\nGame Version: v%s | Servidor Ativo",
                 tostring(GAME_MODE_NAME), tostring(game.PlaceId), tostring(game.PlaceVersion)))
 
-        local scriptVerCard = addNativeParagraph(setTab, "Script Version Status",
+        local scriptVerCard = addNativeParagraph(setTab, "Versao do hub",
             string.format("Versao Instalada: v%s PRO\nStatus GitHub: %s", SCRIPT_VERSION, ScriptUpdateNotice))
 
         addNativeButton(setTab, "Verificar Atualizacoes no GitHub", function()
@@ -3303,7 +3856,7 @@ local function buildNativeUI()
             addLog("info", "Janela recentralizada no centro da tela.")
         end)
 
-        addNativeSection(setTab, "Forensic Tools")
+        addNativeSection(setTab, "Ferramentas de diagnostico")
         addNativeButton(setTab, "Executar Dumper Forense v3.1 (Salvar Jogo)", function()
             addLog("info", "Iniciando Dumper Forense v3.1...")
             task.spawn(function()
@@ -3336,11 +3889,11 @@ local function buildNativeUI()
             end)
         end)
 
-        addNativeSection(setTab, "Hub Information")
-        addNativeParagraph(setTab, "Needle Hub v5.5 Ultimate", "Modern Cyber Glass Architecture | Fully Autonomous AI Automation Engine.")
+        addNativeSection(setTab, "Sobre")
+        addNativeParagraph(setTab, "Needle Hub v5.8", "Modo sem teleporte, automacao por alcance e precos da partida em tempo real.")
 
-        addNativeSection(setTab, "Session Management")
-        addNativeButton(setTab, "UNLOAD / DESTROY SCRIPT", function()
+        addNativeSection(setTab, "Sessao")
+        addNativeButton(setTab, "Fechar e descarregar o hub", function()
             unloadHub()
         end, true)
     end
@@ -3403,4 +3956,4 @@ if not okUi then
     addLog("error", "UI Construct Error: " .. tostring(errUi))
 end
 forceSnap3rdPerson(22)
-addLog("info", "Needle Hub v5.5 loaded successfully! Press LeftAlt to toggle mouse, hold RMB to rotate camera.")
+addLog("info", "Needle Hub v" .. SCRIPT_VERSION .. " loaded successfully! Press LeftAlt to toggle mouse, hold RMB to rotate camera.")
