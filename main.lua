@@ -1,5 +1,5 @@
 --[[
-    SEARCH FOR THE NEEDLE - ULTIMATE AUTOMATION HUB v5.0
+    SEARCH FOR THE NEEDLE - ULTIMATE AUTOMATION HUB v5.5 PRO
     Forensically Engineered from Luau Decompiler Bytecode Dump
     - Exact Multi-Grab Batching using LocalPlayer:GetAttribute("HayGrabCount") & getGrabCandidates
     - Rainbow / RGB Straw Priority via Neon, Material, and Config.isRainbow(hayId)
@@ -84,7 +84,7 @@ else
     GAME_MODE_NAME = "Place " .. tostring(CURRENT_PLACE_ID)
 end
 local CURRENT_PLACE_NAME = GAME_MODE_NAME
-local SCRIPT_VERSION = "5.4"
+local SCRIPT_VERSION = "5.5"
 local CurrentContextMode = IS_LOBBY and "Lobby" or "Match"
 
 -- Require game Config if available for exact mathematical rainbow calculations
@@ -323,6 +323,7 @@ local HubState = {
     AutoCollectGems = true,
     AutoWinNeedle = true,
     AutoDeployDrone = true,
+    AutoBuyTools = false,
     AutoBuyUpgrades = false,
     AutoEquipBestTool = true,
     AutoUseTnt = true,
@@ -653,10 +654,17 @@ end
 local function isRainbowStrand(part)
     if not part or not part:IsA("BasePart") then return false end
 
-    -- Check direct Rainbow attribute
+    -- Check direct Rainbow / Mutation attributes (v1068 Hay Index updates)
     if part:GetAttribute("Rainbow") == true then return true end
+    local mutation = part:GetAttribute("Mutation") or part:GetAttribute("HayType")
+    if mutation and type(mutation) == "string" then
+        local mLower = mutation:lower()
+        if mLower:find("void") or mLower:find("rainbow") or mLower:find("electric") or mLower:find("gold") or mLower:find("glass") or mLower:find("burnt") then
+            return true
+        end
+    end
 
-    -- Check Neon material (Rainbow strands in NeedleHaystackClient are Neon)
+    -- Check Neon material (Special straw mutations in NeedleHaystackClient are Neon / ForceField)
     if part.Material == Enum.Material.Neon or part.Material == Enum.Material.ForceField then
         return true
     end
@@ -668,7 +676,7 @@ local function isRainbowStrand(part)
         if s and res == true then return true end
     end
 
-    -- Color check: Normal hay is tan/yellow (Hue 0.08..0.17). Rainbow has Hue outside yellow with saturation
+    -- Color check: Normal hay is tan/yellow (Hue 0.08..0.17). Rare straws have Hue outside yellow with saturation
     local h, s, v = part.Color:ToHSV()
     if s > 0.35 and (h < 0.08 or h > 0.17) then
         return true
@@ -1147,32 +1155,44 @@ end)
 table.insert(HubThreads, droneThread)
 
 -- 8.5 AUTO-BUY TOOLS & UPGRADES
+local barnToolNames = {"Pitchfork", "Tnt", "Drone", "Vacuum"}
+local barnToolAttributes = {
+    Pitchfork = "PitchforkOwned",
+    Tnt = "TntOwned",
+    Drone = "DroneOwned",
+    Vacuum = "VacuumOwned"
+}
+
 local upgradeTracks = {
-    "Pitchfork",
-    "Capacity",
-    "HandHold",
-    "VacuumPower",
-    "VacuumRuntime",
-    "VacuumCooling",
-    "PitchforkCooldown",
-    "PitchforkHold",
-    "DroneGrab",
-    "DroneSpeed",
-    "DroneCapacity",
-    "TntLuck",
-    "TntPower",
-    "TntCooldown"
+    "Capacity", "Grab", "Speed", "VacuumPower", "VacuumRuntime",
+    "VacuumCooling", "PitchforkCooldown", "PitchforkHold", "DroneGrab",
+    "DroneSpeed", "DroneCapacity", "TntLuck", "TntPower", "TntCooldown"
 }
 
 task.spawn(function()
     while IsHubLoaded do
-        task.wait(2.5)
-        if HubState.AutoBuyUpgrades and IS_GAMEPLAY and Remotes.BuyUpgrade then
-            for _, track in ipairs(upgradeTracks) do
-                pcall(function()
-                    Remotes.BuyUpgrade:FireServer(track)
-                end)
-                task.wait(0.08)
+        task.wait(2.0)
+        if IS_GAMEPLAY then
+            -- 1. Auto Buy Barn Tools if enabled (free in-game hay currency)
+            if HubState.AutoBuyTools and Remotes.BuyShopItem then
+                for _, toolName in ipairs(barnToolNames) do
+                    local attr = barnToolAttributes[toolName]
+                    if attr and LocalPlayer:GetAttribute(attr) ~= true then
+                        pcall(function()
+                            Remotes.BuyShopItem:FireServer(toolName)
+                        end)
+                        task.wait(0.12)
+                    end
+                end
+            end
+            -- 2. Auto Buy Match Upgrades if enabled (free in-game hay currency)
+            if HubState.AutoBuyUpgrades and Remotes.BuyUpgrade then
+                for _, track in ipairs(upgradeTracks) do
+                    pcall(function()
+                        Remotes.BuyUpgrade:FireServer(track)
+                    end)
+                    task.wait(0.08)
+                end
             end
         end
     end
@@ -1458,30 +1478,117 @@ local espThread = task.spawn(function()
 end)
 table.insert(HubThreads, espThread)
 
--- 8.9 LOBBY AUTOMATION
+-- 8.9 LOBBY AUTOMATION & CODE REDEMPTION INVESTIGATION
 local KNOWN_CODES = {
-    "Launch", "Release", "Update", "1KLikes", "5KLikes", "10KLikes",
-    "100KVisits", "Needle", "Haystack", "Lucky", "Win"
+    "RELEASE", "Release", "UPDATE", "Update", "NEEDLE", "Needle",
+    "HAYSTACK", "Haystack", "LUCKY", "Lucky", "WIN", "Win",
+    "FARM", "Farm", "10KLIKES", "10KLikes", "50KLIKES", "50KLikes",
+    "100KVISITS", "100KVisits", "GARAGE", "COW"
 }
 
+local LastCodeStatusMessage = "Nenhum codigo resgatado ainda"
+
+local function redeemSingleCode(code)
+    if not code or type(code) ~= "string" or code:match("^%s*$") then
+        LastCodeStatusMessage = "Codigo invalido ou vazio"
+        return false, "Vazio"
+    end
+    code = code:gsub("%s+", "")
+    if not IS_LOBBY or not Remotes.RedeemCode then
+        local msg = "Codigos so funcionam no LOBBY! No mapa de jogo nao ha sistema de codigos."
+        addLog("warn", msg)
+        LastCodeStatusMessage = msg
+        return false, msg
+    end
+    
+    addLog("info", "Testando codigo no servidor: [" .. code .. "]...")
+    local ok, res, extra = pcall(function()
+        return Remotes.RedeemCode:InvokeServer(code)
+    end)
+    
+    local respStr = tostring(res)
+    if extra ~= nil then
+        respStr = respStr .. " (" .. tostring(extra) .. ")"
+    end
+    
+    if ok then
+        addLog("info", "Codigo [" .. code .. "] -> Resposta do Servidor: " .. respStr)
+        LastCodeStatusMessage = "[" .. code .. "]: " .. respStr
+        
+        -- Check PlayerGui notification
+        pcall(function()
+            local pGui = LocalPlayer:FindFirstChild("PlayerGui")
+            if pGui then
+                local codeUi = pGui:FindFirstChild("CodeUi")
+                if codeUi then
+                    local notif = codeUi:FindFirstChild("Notification")
+                    if notif and notif:IsA("TextLabel") and notif.Text ~= "" then
+                        addLog("info", "Notificacao do Jogo: " .. notif.Text)
+                        LastCodeStatusMessage = "[" .. code .. "]: " .. notif.Text
+                    end
+                end
+            end
+        end)
+        return true, respStr
+    else
+        addLog("error", "Codigo [" .. code .. "] -> Erro RPC: " .. respStr)
+        LastCodeStatusMessage = "Erro ao enviar: " .. respStr
+        return false, respStr
+    end
+end
+
 local function redeemAllCodes(userCode)
-    if not Remotes.RedeemCode then
-        addLog("warn", "RedeemCode remote not found in current place")
+    if not IS_LOBBY or not Remotes.RedeemCode then
+        local msg = "Codigos funcionam APENAS no LOBBY! Teleporte para o Lobby antes de resgatar."
+        addLog("warn", msg)
+        LastCodeStatusMessage = msg
         return
     end
-    addLog("info", "Redeeming known codes...")
-    for _, code in ipairs(KNOWN_CODES) do
-        pcall(function()
-            Remotes.RedeemCode:InvokeServer(code)
-            task.wait(0.25)
-        end)
+    
+    task.spawn(function()
+        addLog("info", "Iniciando lote de teste de codigos no Lobby...")
+        local count = 0
+        for _, code in ipairs(KNOWN_CODES) do
+            count = count + 1
+            redeemSingleCode(code)
+            task.wait(0.3)
+        end
+        if userCode and userCode ~= "" then
+            redeemSingleCode(userCode)
+        end
+        addLog("info", string.format("Lote de codigos finalizado! Testados: %d codigos.", count))
+    end)
+end
+
+-- Robux Marketplace Prompt Helper (Explicitly tagged)
+local function promptRobuxPurchase(kind, id, itemName)
+    local numId = tonumber(id)
+    if not numId or numId <= 0 then
+        -- If no direct ID, try finding and clicking in-game GUI button
+        addLog("warn", "[ROBUX] Tentando abrir compra de " .. tostring(itemName) .. " via interface...")
+        local pGui = LocalPlayer:FindFirstChild("PlayerGui")
+        if pGui then
+            local gpUi = pGui:FindFirstChild("GamepassUI")
+            if gpUi then
+                local btn = gpUi:FindFirstChild("DoubleGemsButton", true)
+                if btn and firesignal then
+                    firesignal(btn.Activated)
+                    return
+                end
+            end
+        end
+        addLog("warn", "[ROBUX] ID numerico nao configurado para: " .. tostring(itemName))
+        return
     end
-    if userCode and userCode ~= "" then
-        pcall(function()
-            Remotes.RedeemCode:InvokeServer(userCode)
-        end)
-    end
-    addLog("info", "Code redemption batch finished.")
+    addLog("warn", "[ROBUX] Solicitando confirmacao oficial da Roblox para: " .. tostring(itemName) .. " (ID " .. tostring(numId) .. ")")
+    pcall(function()
+        local MarketplaceService = safeService("MarketplaceService")
+        if kind == "GamePass" then
+            MarketplaceService:PromptGamePassPurchase(LocalPlayer, numId)
+        else
+            MarketplaceService:PromptProductPurchase(LocalPlayer, numId)
+        end
+    end)
 end
 
 -- 8.10 UNLOAD / DESTROY HUB
@@ -1520,7 +1627,7 @@ local function unloadHub()
     addLog("info", "Needle Hub unloaded cleanly.")
 end
 
----- SECTION 9: USER INTERFACE (CYBER GLASS ADAPTIVE HUD v5.4)
+---- SECTION 9: USER INTERFACE (CYBER GLASS ADAPTIVE HUD v5.5 PRO)
 
 -- Helper: Smooth Tweening
 local function tweenGui(obj, props, duration, style, direction)
@@ -2085,17 +2192,19 @@ local function buildNativeUI()
         return scroll
     end
 
-    -- UI Component: Section Header
-    local function addNativeSection(parent, title)
+    -- UI Component: Section Header (Context-Colored)
+    local function addNativeSection(parent, title, customAccentColor)
         local frame = Instance.new("Frame")
         frame.Size = UDim2.new(0.96, 0, 0, 22)
         frame.BackgroundTransparency = 1
         frame.Parent = parent
 
+        local accent = customAccentColor or Color3.fromRGB(99, 102, 241)
+
         local bar = Instance.new("Frame")
         bar.Size = UDim2.new(0, 3, 0.7, 0)
         bar.Position = UDim2.new(0, 2, 0.15, 0)
-        bar.BackgroundColor3 = Color3.fromRGB(99, 102, 241)
+        bar.BackgroundColor3 = accent
         bar.BorderSizePixel = 0
         bar.Parent = frame
         local bc = Instance.new("UICorner") bc.CornerRadius = UDim.new(1, 0) bc.Parent = bar
@@ -2105,15 +2214,15 @@ local function buildNativeUI()
         lbl.Position = UDim2.fromOffset(12, 0)
         lbl.BackgroundTransparency = 1
         lbl.Text = string.upper(title)
-        lbl.TextColor3 = Color3.fromRGB(129, 140, 248)
+        lbl.TextColor3 = accent
         lbl.Font = Enum.Font.GothamBold
         lbl.TextSize = 10
         lbl.TextXAlignment = Enum.TextXAlignment.Left
         lbl.Parent = frame
 
         local line = Instance.new("Frame")
-        line.Size = UDim2.new(1, -120, 0, 1)
-        line.Position = UDim2.new(0, 110, 0.5, 0)
+        line.Size = UDim2.new(1, -130, 0, 1)
+        line.Position = UDim2.new(0, 120, 0.5, 0)
         line.BackgroundColor3 = Color3.fromRGB(38, 41, 58)
         line.BorderSizePixel = 0
         line.Parent = frame
@@ -2183,30 +2292,53 @@ local function buildNativeUI()
         return frame
     end
 
-    -- UI Component: Button
-    local function addNativeButton(parent, title, callback, isPrimary)
+    -- UI Component: Button (Supports Robux Gold, Gem Green, Primary Indigo)
+    local function addNativeButton(parent, title, callback, isPrimary, buttonStyle)
         local btn = Instance.new("TextButton")
         btn.Size = UDim2.new(0.96, 0, 0, 30)
-        btn.BackgroundColor3 = isPrimary and Color3.fromRGB(79, 70, 229) or Color3.fromRGB(24, 26, 38)
         btn.Text = title
-        btn.TextColor3 = isPrimary and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(225, 230, 245)
         btn.Font = Enum.Font.GothamBold
-        btn.TextSize = 11
+        btn.TextSize = 10
         btn.AutoButtonColor = false
         btn.Parent = parent
 
         local c = Instance.new("UICorner") c.CornerRadius = UDim.new(0, 6) c.Parent = btn
         local s = Instance.new("UIStroke")
-        s.Color = isPrimary and Color3.fromRGB(129, 140, 248) or Color3.fromRGB(44, 48, 70)
         s.Thickness = 1
         s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
         s.Parent = btn
 
+        local bgCol = Color3.fromRGB(24, 26, 38)
+        local textCol = Color3.fromRGB(225, 230, 245)
+        local strokeCol = Color3.fromRGB(44, 48, 70)
+        local hoverCol = Color3.fromRGB(34, 37, 54)
+
+        if buttonStyle == "robux" then
+            bgCol = Color3.fromRGB(44, 32, 14)
+            textCol = Color3.fromRGB(251, 191, 36)
+            strokeCol = Color3.fromRGB(217, 119, 6)
+            hoverCol = Color3.fromRGB(60, 44, 18)
+        elseif buttonStyle == "gem" then
+            bgCol = Color3.fromRGB(14, 38, 26)
+            textCol = Color3.fromRGB(52, 211, 153)
+            strokeCol = Color3.fromRGB(16, 185, 129)
+            hoverCol = Color3.fromRGB(20, 54, 36)
+        elseif isPrimary then
+            bgCol = Color3.fromRGB(79, 70, 229)
+            textCol = Color3.fromRGB(255, 255, 255)
+            strokeCol = Color3.fromRGB(129, 140, 248)
+            hoverCol = Color3.fromRGB(99, 102, 241)
+        end
+
+        btn.BackgroundColor3 = bgCol
+        btn.TextColor3 = textCol
+        s.Color = strokeCol
+
         btn.MouseEnter:Connect(function()
-            tweenGui(btn, {BackgroundColor3 = isPrimary and Color3.fromRGB(99, 102, 241) or Color3.fromRGB(34, 37, 54)}, 0.15)
+            tweenGui(btn, {BackgroundColor3 = hoverCol}, 0.15)
         end)
         btn.MouseLeave:Connect(function()
-            tweenGui(btn, {BackgroundColor3 = isPrimary and Color3.fromRGB(79, 70, 229) or Color3.fromRGB(24, 26, 38)}, 0.15)
+            tweenGui(btn, {BackgroundColor3 = bgCol}, 0.15)
         end)
         btn.MouseButton1Click:Connect(function()
             tweenGui(btn, {Size = UDim2.new(0.94, 0, 0, 28)}, 0.08, Enum.EasingStyle.Sine, Enum.EasingDirection.Out)
@@ -2297,24 +2429,26 @@ local function buildNativeUI()
         end)
     end
 
-    -- UI Component: Modern Info / Status Card
-    local function addNativeParagraph(parent, title, content)
+    -- UI Component: Modern Info / Status Card (Context-Colored)
+    local function addNativeParagraph(parent, title, content, customAccentColor)
         local frame = Instance.new("Frame")
         frame.Size = UDim2.new(0.96, 0, 0, 52)
         frame.BackgroundColor3 = Color3.fromRGB(20, 22, 32)
         frame.BorderSizePixel = 0
         frame.Parent = parent
 
+        local accentCol = customAccentColor or Color3.fromRGB(99, 102, 241)
+
         local c = Instance.new("UICorner") c.CornerRadius = UDim.new(0, 6) c.Parent = frame
         local s = Instance.new("UIStroke")
-        s.Color = Color3.fromRGB(36, 40, 58)
+        s.Color = customAccentColor and Color3.fromRGB(math.floor(accentCol.R * 120), math.floor(accentCol.G * 120), math.floor(accentCol.B * 120)) or Color3.fromRGB(36, 40, 58)
         s.Thickness = 1
         s.Parent = frame
 
         local accent = Instance.new("Frame")
         accent.Size = UDim2.new(0, 3, 0.7, 0)
         accent.Position = UDim2.new(0, 4, 0.15, 0)
-        accent.BackgroundColor3 = Color3.fromRGB(99, 102, 241)
+        accent.BackgroundColor3 = accentCol
         accent.BorderSizePixel = 0
         accent.Parent = frame
         local ac = Instance.new("UICorner") ac.CornerRadius = UDim.new(1, 0) ac.Parent = accent
@@ -2324,7 +2458,7 @@ local function buildNativeUI()
         tLbl.Position = UDim2.fromOffset(12, 4)
         tLbl.BackgroundTransparency = 1
         tLbl.Text = title
-        tLbl.TextColor3 = Color3.fromRGB(165, 180, 252)
+        tLbl.TextColor3 = accentCol
         tLbl.Font = Enum.Font.GothamBold
         tLbl.TextSize = 10
         tLbl.TextXAlignment = Enum.TextXAlignment.Left
@@ -2402,18 +2536,20 @@ local function buildNativeUI()
         -- LOBBY MODE (ONLY LOBBY FEATURES SHOWN)
         -- ==================================================================
         local lobbyTab = createTab("Lobby Hub", "HUB")
+        local lobbyShopTab = createTab("Lobby Shop", "SHOP")
+        local codesTab = createTab("Codigos", "CODE")
         local playerTab = createTab("Player", "HERO")
         local warpTab = createTab("Match Warp", "WARP")
         local consoleTab = createTab("Console", "LOGS")
         local setTab = createTab("Settings", "CFG")
 
         -- 1. Lobby Hub Tab
-        addNativeSection(lobbyTab, "Class System & Spins")
+        addNativeSection(lobbyTab, "Class System & Spins", Color3.fromRGB(99, 102, 241))
         local classStatusCard = addNativeParagraph(lobbyTab, "Active Class & Gems",
             string.format("Class: [%s] | Gems: %s | Target: [%s]",
                 tostring(LocalPlayer:GetAttribute("ActiveClass") or "Starter"),
                 tostring(LocalPlayer:GetAttribute("Gems") or 0),
-                HubState.TargetClass))
+                HubState.TargetClass), Color3.fromRGB(99, 102, 241))
 
         task.spawn(function()
             while IsHubLoaded do
@@ -2470,7 +2606,7 @@ local function buildNativeUI()
             end
         end)
 
-        addNativeSection(lobbyTab, "Target Class Quick-Pick")
+        addNativeSection(lobbyTab, "Target Class Quick-Pick", Color3.fromRGB(99, 102, 241))
         addNativeButton(lobbyTab, "Target: Ultimate Farmer (0.1% Mythic)", function()
             HubState.TargetClass = "Ultimate Farmer"
             addLog("info", "Target Class definida como: Ultimate Farmer")
@@ -2500,7 +2636,7 @@ local function buildNativeUI()
             addLog("info", "Target Class definida como: Pack Mule")
         end)
 
-        addNativeSection(lobbyTab, "Class Slots")
+        addNativeSection(lobbyTab, "Class Slots", Color3.fromRGB(99, 102, 241))
         addNativeButton(lobbyTab, "Equip Class Slot 1", function()
             if Remotes.SelectClassSlot then
                 local s, res = pcall(function() return Remotes.SelectClassSlot:InvokeServer(1) end)
@@ -2520,17 +2656,7 @@ local function buildNativeUI()
             end
         end)
 
-        addNativeSection(lobbyTab, "Game Codes & Free Rewards")
-        addNativeButton(lobbyTab, "Redeem All Known Codes (11 Codes Batch)", function()
-            redeemAllCodes("")
-        end, true)
-        addNativeInput(lobbyTab, "Insira codigo customizado...", "Resgatar", function(txt)
-            if txt and txt ~= "" then
-                redeemAllCodes(txt)
-            end
-        end)
-
-        addNativeSection(lobbyTab, "Pets & Companions")
+        addNativeSection(lobbyTab, "Pets & Companions", Color3.fromRGB(99, 102, 241))
         addNativeButton(lobbyTab, "Equip Cow Pet (Sells in Place + 120 Cap)", function()
             if Remotes.EquipPet then
                 local s, res = pcall(function() return Remotes.EquipPet:InvokeServer("Cow") end)
@@ -2548,7 +2674,7 @@ local function buildNativeUI()
             end
         end)
 
-        addNativeSection(lobbyTab, "Chests & Event Rewards")
+        addNativeSection(lobbyTab, "Chests & Event Rewards", Color3.fromRGB(99, 102, 241))
         addNativeButton(lobbyTab, "Open All Event Chests (Batch x10)", function()
             if Remotes.OpenChest then
                 addLog("info", "Iniciando abertura de baus de evento...")
@@ -2562,7 +2688,7 @@ local function buildNativeUI()
             end
         end)
 
-        addNativeSection(lobbyTab, "Lobby Navigation & Portals")
+        addNativeSection(lobbyTab, "Lobby Navigation & Portals", Color3.fromRGB(99, 102, 241))
         addNativeButton(lobbyTab, "Teleport to Match Circle (Join Game)", function()
             local hrp = getHRP()
             if hrp then
@@ -2590,8 +2716,125 @@ local function buildNativeUI()
             if hrp then hrp.CFrame = CFrame.new(-10, 5, 25) addLog("info", "Teleported to Class Pedestal area.") end
         end)
 
-        -- 2. Match Warp Tab
-        addNativeSection(warpTab, "Direct Match Teleports")
+        -- 2. Lobby Shop Tab (Dedicated Store with Clear Separation)
+        addNativeSection(lobbyShopTab, "Melhorias Permanentes (Moeda: Gemas)", Color3.fromRGB(52, 211, 153))
+        local lobbyGemsCard = addNativeParagraph(lobbyShopTab, "Gemas da Conta", "Gemas Atuais: " .. tostring(LocalPlayer:GetAttribute("Gems") or 0) .. " | Melhorias permanentes de conta.", Color3.fromRGB(52, 211, 153))
+        task.spawn(function()
+            while IsHubLoaded do
+                task.wait(1.5)
+                pcall(function()
+                    if lobbyGemsCard and lobbyGemsCard.Parent then
+                        lobbyGemsCard.Text = "Gemas Atuais: " .. tostring(LocalPlayer:GetAttribute("Gems") or 0) .. " | Melhorias permanentes de conta."
+                    end
+                end)
+            end
+        end)
+        
+        addNativeButton(lobbyShopTab, "Upgrade Permanente: +5 Capacidade (ExtraHoldAmount)", function()
+            if Remotes.BuyUpgrade then
+                pcall(function() Remotes.BuyUpgrade:FireServer("ExtraHoldAmount") end)
+                addLog("info", "Comprado upgrade de Gemas: ExtraHoldAmount")
+            end
+        end, false, "gem")
+        addNativeButton(lobbyShopTab, "Upgrade Permanente: +1 Pegada (ExtraTakeAmount)", function()
+            if Remotes.BuyUpgrade then
+                pcall(function() Remotes.BuyUpgrade:FireServer("ExtraTakeAmount") end)
+                addLog("info", "Comprado upgrade de Gemas: ExtraTakeAmount")
+            end
+        end, false, "gem")
+        addNativeButton(lobbyShopTab, "Upgrade Permanente: +1 Multiplicador de Gema (GemValue)", function()
+            if Remotes.BuyUpgrade then
+                pcall(function() Remotes.BuyUpgrade:FireServer("GemValue") end)
+                addLog("info", "Comprado upgrade de Gemas: GemValue")
+            end
+        end, false, "gem")
+        addNativeButton(lobbyShopTab, "Upgrade Permanente: +10% Valor do Feno (ExtraHayValue)", function()
+            if Remotes.BuyUpgrade then
+                pcall(function() Remotes.BuyUpgrade:FireServer("ExtraHayValuePercentage") end)
+                addLog("info", "Comprado upgrade de Gemas: ExtraHayValuePercentage")
+            end
+        end, false, "gem")
+
+        addNativeSection(lobbyShopTab, "Mercado do Lobby & Skins (Moeda do Jogo)", Color3.fromRGB(99, 102, 241))
+        addNativeButton(lobbyShopTab, "Abrir Interface do Mercador (Merchant)", function()
+            pcall(function()
+                local ms = ReplicatedStorage:FindFirstChild("MerchantSystem")
+                if ms and ms:FindFirstChild("OpenMerchant") then
+                    ms.OpenMerchant:Fire()
+                    addLog("info", "Disparado evento OpenMerchant")
+                end
+            end)
+        end)
+
+        addNativeSection(lobbyShopTab, "Loja Robux (Pago com Robux Real)", Color3.fromRGB(245, 158, 11))
+        addNativeParagraph(lobbyShopTab, "ATENCAO - PRODUTO PAGO COM ROBUX", "Os itens abaixo custam ROBUX reais da sua conta Roblox! Clicar em qualquer opcao abrira a confirmacao oficial da Roblox.", Color3.fromRGB(245, 158, 11))
+        
+        addNativeButton(lobbyShopTab, "[ROBUX] 2x Gemas Permanente (Gamepass 99 R$)", function()
+            promptRobuxPurchase("GamePass", 0, "2x Gemas")
+        end, false, "robux")
+        addNativeButton(lobbyShopTab, "[ROBUX] Mochila Infinita (Infinite Bag Gamepass)", function()
+            promptRobuxPurchase("GamePass", 0, "Mochila Infinita")
+        end, false, "robux")
+        addNativeButton(lobbyShopTab, "[ROBUX] Forquilha Permanente (Permanent Pitchfork)", function()
+            promptRobuxPurchase("GamePass", 0, "Permanent Pitchfork")
+        end, false, "robux")
+        addNativeButton(lobbyShopTab, "[ROBUX] Aspirador Permanente (Permanent Vacuum)", function()
+            promptRobuxPurchase("GamePass", 0, "Permanent Vacuum")
+        end, false, "robux")
+        addNativeButton(lobbyShopTab, "[ROBUX] TNT Permanente (Permanent TNT)", function()
+            promptRobuxPurchase("GamePass", 0, "Permanent TNT")
+        end, false, "robux")
+        addNativeButton(lobbyShopTab, "[ROBUX] Drone Permanente (Permanent Drone)", function()
+            promptRobuxPurchase("GamePass", 0, "Permanent Drone")
+        end, false, "robux")
+
+        -- 3. Dedicated Promo Codes Tab
+        addNativeSection(codesTab, "Sistema de Codigos Promocionais", Color3.fromRGB(99, 102, 241))
+        addNativeParagraph(codesTab, "Resgate de Recompensas", "Resgate codigos promocionais oficiais do jogo para obter Gemas, Moedas e bonus gratuitos no Lobby!", Color3.fromRGB(99, 102, 241))
+
+        addNativeSection(codesTab, "Status do Ultimo Resgate", Color3.fromRGB(56, 189, 248))
+        local codeStatusCard = addNativeParagraph(codesTab, "Resposta do Servidor", LastCodeStatusMessage, Color3.fromRGB(56, 189, 248))
+        task.spawn(function()
+            while IsHubLoaded do
+                task.wait(0.5)
+                pcall(function()
+                    if codeStatusCard and codeStatusCard.Parent then
+                        codeStatusCard.Text = LastCodeStatusMessage
+                    end
+                end)
+            end
+        end)
+
+        addNativeSection(codesTab, "Acoes de Resgate", Color3.fromRGB(99, 102, 241))
+        addNativeButton(codesTab, "Resgatar Todos os Codigos (Lote de 20 Codigos)", function()
+            redeemAllCodes("")
+        end, true)
+
+        addNativeInput(codesTab, "Insira codigo customizado...", "Resgatar", function(txt)
+            if txt and txt ~= "" then
+                redeemSingleCode(txt)
+            end
+        end)
+
+        addNativeSection(codesTab, "Interface Oficial do Jogo", Color3.fromRGB(156, 163, 175))
+        addNativeButton(codesTab, "Abrir Interface Nativa de Codigos do Jogo", function()
+            pcall(function()
+                local pGui = LocalPlayer:FindFirstChild("PlayerGui")
+                if pGui then
+                    local codeUi = pGui:FindFirstChild("CodeUi")
+                    if codeUi then
+                        local codeFrame = codeUi:FindFirstChild("CodeFrame")
+                        if codeFrame then
+                            codeFrame.Visible = not codeFrame.Visible
+                            addLog("info", "Toggled native CodeFrame visibility: " .. tostring(codeFrame.Visible))
+                        end
+                    end
+                end
+            end)
+        end)
+
+        -- 4. Match Warp Tab
+        addNativeSection(warpTab, "Direct Match Teleports", Color3.fromRGB(99, 102, 241))
         addNativeButton(warpTab, "Direct Teleport to Farmhouse Match (ID 108628039999641)", function()
             addLog("info", "Teleporting to Farmhouse Match...")
             TeleportService:Teleport(FARMHOUSE_PLACE_ID, LocalPlayer)
@@ -2601,7 +2844,7 @@ local function buildNativeUI()
             TeleportService:Teleport(BASEMENT_PLACE_ID, LocalPlayer)
         end)
 
-        addNativeSection(warpTab, "Server Routing")
+        addNativeSection(warpTab, "Server Routing", Color3.fromRGB(99, 102, 241))
         addNativeButton(warpTab, "Server Hop (Find New Lobby)", function()
             addLog("info", "Searching for alternate Lobby server...")
             TeleportService:Teleport(LOBBY_PLACE_ID, LocalPlayer)
@@ -2618,6 +2861,7 @@ local function buildNativeUI()
         -- MATCH MODE (ONLY GAMEPLAY FARMING & COMBAT FEATURES SHOWN)
         -- ==================================================================
         local farmTab = createTab("Auto Farm", "FARM")
+        local shopTab = createTab("Barn Shop", "SHOP")
         local playerTab = createTab("Player", "HERO")
         local teleTab = createTab("Teleport", "WARP")
         local espTab = createTab("Visuals ESP", "ESP")
@@ -2625,7 +2869,7 @@ local function buildNativeUI()
         local setTab = createTab("Settings", "CFG")
 
         -- 1. Auto Farm Tab
-        addNativeSection(farmTab, "Harvest Automation")
+        addNativeSection(farmTab, "Harvest Automation", Color3.fromRGB(99, 102, 241))
         addNativeToggle(farmTab, "Auto Collect Hay (Multi-Grab)", HubState.AutoFarmHay, function(val)
             HubState.AutoFarmHay = val
             addLog("info", "Auto Farm Hay: " .. tostring(val))
@@ -2645,9 +2889,9 @@ local function buildNativeUI()
         addNativeSlider(farmTab, "Auto-TNT Interval (Seconds)", 8, 30, HubState.TntInterval, function(val)
             HubState.TntInterval = val
         end)
-        addNativeToggle(farmTab, "Prioritize RGB / Rare Straws (10x Value)", HubState.PrioritizeRGB, function(val)
+        addNativeToggle(farmTab, "Prioritize Rare / RGB / Void (20x Value)", HubState.PrioritizeRGB, function(val)
             HubState.PrioritizeRGB = val
-            addLog("info", "Prioritize RGB: " .. tostring(val))
+            addLog("info", "Prioritize Rare Straws: " .. tostring(val))
         end)
         addNativeToggle(farmTab, "Auto Collect Gems", HubState.AutoCollectGems, function(val)
             HubState.AutoCollectGems = val
@@ -2664,12 +2908,9 @@ local function buildNativeUI()
         addNativeToggle(farmTab, "Auto Deploy Drone", HubState.AutoDeployDrone, function(val)
             HubState.AutoDeployDrone = val
         end)
-        addNativeToggle(farmTab, "Auto Buy Tools & Upgrades", HubState.AutoBuyUpgrades, function(val)
-            HubState.AutoBuyUpgrades = val
-        end)
 
-        addNativeSection(farmTab, "Tool Recognition Status")
-        local toolStatusLbl = addNativeParagraph(farmTab, "Dynamic Tool Recognition", getToolStatusSummary())
+        addNativeSection(farmTab, "Tool Recognition Status", Color3.fromRGB(99, 102, 241))
+        local toolStatusLbl = addNativeParagraph(farmTab, "Dynamic Tool Recognition", getToolStatusSummary(), Color3.fromRGB(99, 102, 241))
         task.spawn(function()
             while IsHubLoaded do
                 task.wait(1.2)
@@ -2681,7 +2922,7 @@ local function buildNativeUI()
             end
         end)
 
-        addNativeSection(farmTab, "Manual Tool Overrides")
+        addNativeSection(farmTab, "Manual Tool Overrides", Color3.fromRGB(99, 102, 241))
         addNativeButton(farmTab, "Auto-Select Best Available Tool", function()
             HubState.ForcedToolSlot = 0
             local bestSlot = getBestAvailableToolSlot()
@@ -2724,7 +2965,7 @@ local function buildNativeUI()
             end
         end)
 
-        addNativeSection(farmTab, "Quick Actions")
+        addNativeSection(farmTab, "Quick Actions", Color3.fromRGB(99, 102, 241))
         addNativeButton(farmTab, "Sell Hay Now (Instant Teleport)", function()
             teleportTo(Landmarks.SellCow)
             task.wait(0.2)
@@ -2732,8 +2973,141 @@ local function buildNativeUI()
             addLog("info", "Executed instant sell.")
         end, true)
 
-        -- 2. Teleport Tab
-        addNativeSection(teleTab, "Map Landmarks")
+        -- 2. Barn Shop Tab (Dedicated Store with Robux vs In-Game Separation)
+        addNativeSection(shopTab, "Ferramentas do Celeiro (Moeda: Hay / Feno)", Color3.fromRGB(99, 102, 241))
+        addNativeParagraph(shopTab, "Sobre as Ferramentas", "Compre ferramentas usando o Feno/Dinheiro da partida. Desbloqueia novas mecanicas de colheita.", Color3.fromRGB(99, 102, 241))
+        
+        addNativeToggle(shopTab, "Auto Buy Barn Tools (Feno)", HubState.AutoBuyTools, function(val)
+            HubState.AutoBuyTools = val
+            addLog("info", "Auto-Buy Barn Tools: " .. tostring(val))
+        end)
+        
+        addNativeButton(shopTab, "Comprar Aspirador (Vacuum) - Moeda de Feno", function()
+            if Remotes.BuyShopItem then
+                pcall(function() Remotes.BuyShopItem:FireServer("Vacuum") end)
+                addLog("info", "Solicitada compra de: Vacuum")
+            end
+        end)
+        addNativeButton(shopTab, "Comprar Forquilha (Pitchfork) - Moeda de Feno", function()
+            if Remotes.BuyShopItem then
+                pcall(function() Remotes.BuyShopItem:FireServer("Pitchfork") end)
+                addLog("info", "Solicitada compra de: Pitchfork")
+            end
+        end)
+        addNativeButton(shopTab, "Comprar Dinamite (TNT) - Moeda de Feno", function()
+            if Remotes.BuyShopItem then
+                pcall(function() Remotes.BuyShopItem:FireServer("Tnt") end)
+                addLog("info", "Solicitada compra de: TNT")
+            end
+        end)
+        addNativeButton(shopTab, "Comprar Drone (Drone Agricola) - Moeda de Feno", function()
+            if Remotes.BuyShopItem then
+                pcall(function() Remotes.BuyShopItem:FireServer("Drone") end)
+                addLog("info", "Solicitada compra de: Drone")
+            end
+        end)
+
+        addNativeSection(shopTab, "Melhorias da Partida (Moeda: Hay / Feno)", Color3.fromRGB(99, 102, 241))
+        addNativeParagraph(shopTab, "Upgrades de Sessao", "Melhorias que duram a rodada atual. Custam o dinheiro ganho colhendo feno.", Color3.fromRGB(99, 102, 241))
+        
+        addNativeToggle(shopTab, "Auto Buy Session Upgrades (Feno)", HubState.AutoBuyUpgrades, function(val)
+            HubState.AutoBuyUpgrades = val
+            addLog("info", "Auto-Buy Session Upgrades: " .. tostring(val))
+        end)
+        
+        addNativeButton(shopTab, "Upgrade: Capacidade da Mochila (Capacity)", function()
+            if Remotes.BuyUpgrade then pcall(function() Remotes.BuyUpgrade:FireServer("Capacity") end) end
+        end)
+        addNativeButton(shopTab, "Upgrade: Quantidade por Pegada (Grab)", function()
+            if Remotes.BuyUpgrade then pcall(function() Remotes.BuyUpgrade:FireServer("Grab") end) end
+        end)
+        addNativeButton(shopTab, "Upgrade: Velocidade de Coleta (Speed)", function()
+            if Remotes.BuyUpgrade then pcall(function() Remotes.BuyUpgrade:FireServer("Speed") end) end
+        end)
+        addNativeButton(shopTab, "Upgrade: Aspirador Potencia (VacuumPower)", function()
+            if Remotes.BuyUpgrade then pcall(function() Remotes.BuyUpgrade:FireServer("VacuumPower") end) end
+        end)
+        addNativeButton(shopTab, "Upgrade: Aspirador Resfriamento (VacuumCooling)", function()
+            if Remotes.BuyUpgrade then pcall(function() Remotes.BuyUpgrade:FireServer("VacuumCooling") end) end
+        end)
+        addNativeButton(shopTab, "Upgrade: TNT Sorte Arco-Iris (TntLuck)", function()
+            if Remotes.BuyUpgrade then pcall(function() Remotes.BuyUpgrade:FireServer("TntLuck") end) end
+        end)
+        addNativeButton(shopTab, "Upgrade: TNT Cooldown (TntCooldown)", function()
+            if Remotes.BuyUpgrade then pcall(function() Remotes.BuyUpgrade:FireServer("TntCooldown") end) end
+        end)
+        addNativeButton(shopTab, "Upgrade: Drone Capacidade (DroneCapacity)", function()
+            if Remotes.BuyUpgrade then pcall(function() Remotes.BuyUpgrade:FireServer("DroneCapacity") end) end
+        end)
+        addNativeButton(shopTab, "Upgrade: Drone Pegada (DroneGrab)", function()
+            if Remotes.BuyUpgrade then pcall(function() Remotes.BuyUpgrade:FireServer("DroneGrab") end) end
+        end)
+
+        addNativeSection(shopTab, "Melhorias Permanentes (Moeda: Gemas)", Color3.fromRGB(52, 211, 153))
+        local matchGemsCard = addNativeParagraph(shopTab, "Gemas da Conta", "Gemas Atuais: " .. tostring(LocalPlayer:GetAttribute("Gems") or 0) .. " | Melhorias permanentes de conta.", Color3.fromRGB(52, 211, 153))
+        task.spawn(function()
+            while IsHubLoaded do
+                task.wait(1.5)
+                pcall(function()
+                    if matchGemsCard and matchGemsCard.Parent then
+                        matchGemsCard.Text = "Gemas Atuais: " .. tostring(LocalPlayer:GetAttribute("Gems") or 0) .. " | Melhorias permanentes de conta."
+                    end
+                end)
+            end
+        end)
+        
+        addNativeButton(shopTab, "Upgrade Permanente: +5 Capacidade (ExtraHoldAmount)", function()
+            if Remotes.BuyUpgrade then
+                pcall(function() Remotes.BuyUpgrade:FireServer("ExtraHoldAmount") end)
+                addLog("info", "Comprado upgrade de Gemas: ExtraHoldAmount")
+            end
+        end, false, "gem")
+        addNativeButton(shopTab, "Upgrade Permanente: +1 Pegada (ExtraTakeAmount)", function()
+            if Remotes.BuyUpgrade then
+                pcall(function() Remotes.BuyUpgrade:FireServer("ExtraTakeAmount") end)
+                addLog("info", "Comprado upgrade de Gemas: ExtraTakeAmount")
+            end
+        end, false, "gem")
+        addNativeButton(shopTab, "Upgrade Permanente: +1 Multiplicador de Gema (GemValue)", function()
+            if Remotes.BuyUpgrade then
+                pcall(function() Remotes.BuyUpgrade:FireServer("GemValue") end)
+                addLog("info", "Comprado upgrade de Gemas: GemValue")
+            end
+        end, false, "gem")
+        addNativeButton(shopTab, "Upgrade Permanente: +10% Valor do Feno (ExtraHayValue)", function()
+            if Remotes.BuyUpgrade then
+                pcall(function() Remotes.BuyUpgrade:FireServer("ExtraHayValuePercentage") end)
+                addLog("info", "Comprado upgrade de Gemas: ExtraHayValuePercentage")
+            end
+        end, false, "gem")
+
+        addNativeSection(shopTab, "Loja Robux (Pago com Robux Real)", Color3.fromRGB(245, 158, 11))
+        addNativeParagraph(shopTab, "ATENCAO - PRODUTO PAGO COM ROBUX", "Os itens abaixo custam ROBUX reais da sua conta Roblox! Clicar em qualquer opcao abrira a confirmacao oficial da Roblox.", Color3.fromRGB(245, 158, 11))
+        
+        addNativeButton(shopTab, "[ROBUX] 2x Gemas Permanente (Gamepass 99 R$)", function()
+            promptRobuxPurchase("GamePass", 0, "2x Gemas")
+        end, false, "robux")
+        addNativeButton(shopTab, "[ROBUX] Mochila Infinita (Infinite Bag Gamepass)", function()
+            promptRobuxPurchase("GamePass", 0, "Mochila Infinita")
+        end, false, "robux")
+        addNativeButton(shopTab, "[ROBUX] Forquilha Permanente (Permanent Pitchfork)", function()
+            promptRobuxPurchase("GamePass", 0, "Permanent Pitchfork")
+        end, false, "robux")
+        addNativeButton(shopTab, "[ROBUX] Aspirador Permanente (Permanent Vacuum)", function()
+            promptRobuxPurchase("GamePass", 0, "Permanent Vacuum")
+        end, false, "robux")
+        addNativeButton(shopTab, "[ROBUX] TNT Permanente (Permanent TNT)", function()
+            promptRobuxPurchase("GamePass", 0, "Permanent TNT")
+        end, false, "robux")
+        addNativeButton(shopTab, "[ROBUX] Drone Permanente (Permanent Drone)", function()
+            promptRobuxPurchase("GamePass", 0, "Permanent Drone")
+        end, false, "robux")
+
+        addNativeSection(shopTab, "Aviso sobre Codigos", Color3.fromRGB(156, 163, 175))
+        addNativeParagraph(shopTab, "Codigos Promocionais", "O sistema de codigos funciona exclusivamente no LOBBY! Use a aba Teleport -> Return to Lobby para resgatar codigos.", Color3.fromRGB(156, 163, 175))
+
+        -- 3. Teleport Tab
+        addNativeSection(teleTab, "Map Landmarks", Color3.fromRGB(99, 102, 241))
         addNativeButton(teleTab, "Teleport to Hay Mound", function()
             teleportTo(Landmarks.HayCenter)
             addLog("info", "Teleported to Hay Mound")
@@ -2759,7 +3133,7 @@ local function buildNativeUI()
             end
         end)
 
-        addNativeSection(teleTab, "Server Routing")
+        addNativeSection(teleTab, "Server Routing", Color3.fromRGB(99, 102, 241))
         addNativeButton(teleTab, "Return to Lobby Server", function()
             if Remotes.ReturnToLobby then Remotes.ReturnToLobby:FireServer() end
             TeleportService:Teleport(LOBBY_PLACE_ID, LocalPlayer)
@@ -2768,10 +3142,10 @@ local function buildNativeUI()
             TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, LocalPlayer)
         end)
 
-        -- 3. Visuals ESP Tab
-        addNativeSection(espTab, "Visual ESP Trackers")
+        -- 4. Visuals ESP Tab
+        addNativeSection(espTab, "Visual ESP Trackers", Color3.fromRGB(99, 102, 241))
         addNativeToggle(espTab, "Needle ESP (Bright Yellow)", HubState.NeedleESP, function(val) HubState.NeedleESP = val end)
-        addNativeToggle(espTab, "Rainbow / RGB Straw ESP (Magenta)", HubState.RgbESP, function(val) HubState.RgbESP = val end)
+        addNativeToggle(espTab, "Rare / RGB / Void Straw ESP (Magenta)", HubState.RgbESP, function(val) HubState.RgbESP = val end)
         addNativeToggle(espTab, "Gems ESP (Emerald Green)", HubState.GemESP, function(val) HubState.GemESP = val end)
         addNativeToggle(espTab, "Sell Cow ESP (Electric Blue)", HubState.SellESP, function(val) HubState.SellESP = val end)
         addNativeToggle(espTab, "Player ESP (White)", HubState.PlayerESP, function(val) HubState.PlayerESP = val end)
@@ -2963,7 +3337,7 @@ local function buildNativeUI()
         end)
 
         addNativeSection(setTab, "Hub Information")
-        addNativeParagraph(setTab, "Needle Hub v5.4 Ultimate", "Modern Cyber Glass Architecture | Fully Autonomous AI Automation Engine.")
+        addNativeParagraph(setTab, "Needle Hub v5.5 Ultimate", "Modern Cyber Glass Architecture | Fully Autonomous AI Automation Engine.")
 
         addNativeSection(setTab, "Session Management")
         addNativeButton(setTab, "UNLOAD / DESTROY SCRIPT", function()
@@ -3029,4 +3403,4 @@ if not okUi then
     addLog("error", "UI Construct Error: " .. tostring(errUi))
 end
 forceSnap3rdPerson(22)
-addLog("info", "Needle Hub v5.4 loaded successfully! Press LeftAlt to toggle mouse, hold RMB to rotate camera.")
+addLog("info", "Needle Hub v5.5 loaded successfully! Press LeftAlt to toggle mouse, hold RMB to rotate camera.")
