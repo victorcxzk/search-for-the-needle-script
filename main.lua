@@ -1,5 +1,5 @@
 --[[
-    SEARCH FOR THE NEEDLE - ULTIMATE AUTOMATION HUB v6.1 PRO
+    SEARCH FOR THE NEEDLE - ULTIMATE AUTOMATION HUB v6.2 PRO
     Forensically Engineered from Luau Decompiler Bytecode Dump
     - Exact Multi-Grab Batching using LocalPlayer:GetAttribute("HayGrabCount") & getGrabCandidates
     - Rainbow / RGB Straw Priority via Neon, Material, and Config.isRainbow(hayId)
@@ -115,6 +115,7 @@ local LOBBY_PLACE_ID = 77108422251420
 local FARMHOUSE_PLACE_ID = 108628039999641
 local BASEMENT_PLACE_ID = 83445806734780
 
+local IS_BASEMENT = CURRENT_PLACE_ID == BASEMENT_PLACE_ID
 local IS_GAMEPLAY = (CURRENT_PLACE_ID == FARMHOUSE_PLACE_ID or CURRENT_PLACE_ID == BASEMENT_PLACE_ID)
 local IS_LOBBY = (CURRENT_PLACE_ID == LOBBY_PLACE_ID)
 
@@ -129,7 +130,7 @@ else
     GAME_MODE_NAME = "Place " .. tostring(CURRENT_PLACE_ID)
 end
 local CURRENT_PLACE_NAME = GAME_MODE_NAME
-local SCRIPT_VERSION = "6.1"
+local SCRIPT_VERSION = "6.2"
 local CurrentContextMode = IS_LOBBY and "Lobby" or "Match"
 
 -- Require game Config if available for exact mathematical rainbow calculations
@@ -533,12 +534,51 @@ end
 if Remotes.NeedleFound then
     local conn = Remotes.NeedleFound.OnClientEvent:Connect(function(finderUserId, finderName, ...)
         if finderUserId == LocalPlayer.UserId then
-            addLog("warn", "YOU FOUND THE NEEDLE! Delivering to farmer...")
+            addLog("warn", IS_BASEMENT and "Chave encontrada! Resolva os objetivos antes de abrir a saida."
+                or "Agulha encontrada! Entregue ao fazendeiro.")
         else
-            addLog("info", tostring(finderName) .. " found the needle!")
+            addLog("info", tostring(finderName) .. (IS_BASEMENT and " encontrou a chave!" or " encontrou a agulha!"))
         end
     end)
     table.insert(HubConnections, conn)
+end
+
+local BasementPuzzlesFolder = IS_BASEMENT and ReplicatedStorage:WaitForChild("Puzzles", 10) or nil
+local BasementPuzzleSnapshot = nil
+local BasementRequiredPuzzles = {"ColorPuzzle", "PicturePuzzle", "NumberPuzzle"}
+local BasementPuzzleConfig = nil
+local PuzzleStateRemote = BasementPuzzlesFolder and BasementPuzzlesFolder:WaitForChild("PuzzleState", 5) or nil
+if IS_BASEMENT and BasementPuzzlesFolder then
+    local puzzleConfigModule = BasementPuzzlesFolder:WaitForChild("PuzzleConfig", 5)
+    if puzzleConfigModule and puzzleConfigModule:IsA("ModuleScript") then
+        local ok, config = pcall(require, puzzleConfigModule)
+        if ok and type(config) == "table" then BasementPuzzleConfig = config end
+    end
+    local releaseConfigModule = BasementPuzzlesFolder:WaitForChild("Chapter2ReleaseConfig", 5)
+    if releaseConfigModule and releaseConfigModule:IsA("ModuleScript") then
+        local ok, config = pcall(require, releaseConfigModule)
+        if ok and type(config) == "table" and type(config.RequiredPuzzles) == "table" then
+            BasementRequiredPuzzles = config.RequiredPuzzles
+        end
+    end
+    if PuzzleStateRemote and PuzzleStateRemote:IsA("RemoteEvent") then
+        local conn = PuzzleStateRemote.OnClientEvent:Connect(function(snapshot)
+            if type(snapshot) == "table" then BasementPuzzleSnapshot = snapshot end
+        end)
+        table.insert(HubConnections, conn)
+        local solvedRemote = BasementPuzzlesFolder:FindFirstChild("PuzzleSolved")
+        if solvedRemote and solvedRemote:IsA("RemoteEvent") then
+            local solvedConn = solvedRemote.OnClientEvent:Connect(function()
+                task.delay(0.15, function()
+                    if IsHubLoaded then pcall(function() PuzzleStateRemote:FireServer() end) end
+                end)
+            end)
+            table.insert(HubConnections, solvedConn)
+        end
+        task.defer(function()
+            if IsHubLoaded then pcall(function() PuzzleStateRemote:FireServer() end) end
+        end)
+    end
 end
 
 -- SECTION 7: GLOBAL HUB STATE
@@ -579,6 +619,8 @@ local HubState = {
     GemESP = true,
     PlayerESP = false,
     SellESP = true,
+    BasementGuideESP = true,
+    BasementAutoLevers = false,
 
 }
 
@@ -596,7 +638,7 @@ local ToolNames = {
     [3] = "Pitchfork",
     [4] = "Drone",
     [5] = "Vacuum",
-    [6] = "The Needle"
+    [6] = IS_BASEMENT and "Chave" or "The Needle"
 }
 
 local SlotToolIds = {
@@ -683,7 +725,7 @@ end
 
 local function getBestAvailableToolSlot()
     -- Priority 1: The Needle (Slot 6) - Win condition!
-    if isToolOwned("Needle") then
+    if isToolOwned("Needle") and not IS_BASEMENT then
         return SLOT_NEEDLE, "The Needle"
     end
 
@@ -1330,6 +1372,115 @@ chooseTntTarget = function(hrp)
     return chosen and chosen.Position or nil
 end
 
+local function resolveWorldPart(instance)
+    if not instance then return nil end
+    if instance:IsA("BasePart") then return instance end
+    if instance:IsA("Model") and instance.PrimaryPart then return instance.PrimaryPart end
+    return instance:FindFirstChildWhichIsA("BasePart", true)
+end
+
+local function findBasementTrapdoorPart()
+    local trapdoor = workspace:FindFirstChild("Trapdoor")
+    local closed = trapdoor and trapdoor:FindFirstChild("TrapDoorClosed")
+    return resolveWorldPart(closed and (closed:FindFirstChild("Keyhole", true) or closed))
+end
+
+local BasementPuzzleLabels = {
+    ColorPuzzle = "Cores",
+    PicturePuzzle = "Imagem",
+    NumberPuzzle = "Teclado numerico",
+}
+
+local function getBasementNextObjective()
+    if not IS_BASEMENT or not BasementPuzzlesFolder then return "Porão indisponivel", nil end
+    local hayFolder = ReplicatedStorage:FindFirstChild("NeedleHaystack")
+    local keyOwned = LocalPlayer:GetAttribute("NeedleOwned") == true
+    local keyClaimed = hayFolder and hayFolder:GetAttribute("NeedleClaimed") == true
+    if not keyOwned and not keyClaimed then
+        local target = findVisibleNeedleObjective()
+        local haystack = workspace:FindFirstChild("HaystackClient")
+        return "Encontre a chave no feno", target or getKnownNeedleHayPart(haystack)
+    end
+
+    if BasementPuzzlesFolder:GetAttribute("LeverPuzzleSolved") ~= true then
+        local worldPuzzles = workspace:FindFirstChild("Puzzles")
+        local leverPuzzle = worldPuzzles and worldPuzzles:FindFirstChild("LeverPuzzle")
+        local levers = leverPuzzle and leverPuzzle:FindFirstChild("Levers")
+        for i = 1, 3 do
+            if BasementPuzzlesFolder:GetAttribute("Lever" .. i .. "Pulled") ~= true then
+                return "Acione a alavanca " .. i, resolveWorldPart(levers and levers:FindFirstChild("Lever" .. i))
+            end
+        end
+        return "Conclua o puzzle das alavancas", resolveWorldPart(leverPuzzle)
+    end
+
+    local solvedCount = tonumber(BasementPuzzlesFolder:GetAttribute("SolvedPuzzleCount")) or 0
+    local requiredCount = tonumber(BasementPuzzlesFolder:GetAttribute("RequiredPuzzleCount")) or #BasementRequiredPuzzles
+    if solvedCount < requiredCount then
+        local worldPuzzles = workspace:FindFirstChild("Puzzles")
+        for _, puzzleId in ipairs(BasementRequiredPuzzles) do
+            local state = BasementPuzzleSnapshot and BasementPuzzleSnapshot[puzzleId]
+            if type(state) ~= "table" or state.completed ~= true then
+                return "Resolva: " .. (BasementPuzzleLabels[puzzleId] or puzzleId),
+                    resolveWorldPart(worldPuzzles and worldPuzzles:FindFirstChild(puzzleId))
+            end
+        end
+        return "Resolva os puzzles restantes", nil
+    end
+
+    if BasementPuzzlesFolder:GetAttribute("EscapeReady") == true then
+        return "Abra a saida com a chave", findBasementTrapdoorPart()
+    end
+    return "Aguardando liberacao da saida", findBasementTrapdoorPart()
+end
+
+local basementLeverThread = task.spawn(function()
+    local lastAttemptAt = 0
+    while IsHubLoaded do
+        task.wait(0.8)
+        if IS_BASEMENT and HubState.BasementAutoLevers
+            and LocalPlayer:GetAttribute("NeedleOwned") == true
+            and LocalPlayer:GetAttribute("CutsceneActive") ~= true
+            and LocalPlayer:GetAttribute("NeedleInputLocked") ~= true
+            and BasementPuzzlesFolder and BasementPuzzlesFolder:GetAttribute("LeverPuzzleSolved") ~= true
+            and BasementPuzzleSnapshot and BasementPuzzleConfig
+            and os.clock() - lastAttemptAt >= 1.5 then
+            local actionRemote = BasementPuzzlesFolder:FindFirstChild("PuzzleAction")
+            local definition = BasementPuzzleConfig.Puzzles and BasementPuzzleConfig.Puzzles.LeverPuzzle
+            local folder = type(BasementPuzzleConfig.folderFor) == "function"
+                and BasementPuzzleConfig.folderFor("LeverPuzzle") or nil
+            local snapshot = BasementPuzzleSnapshot.LeverPuzzle
+            local hrp = getHRP()
+            if actionRemote and actionRemote:IsA("RemoteEvent") and definition and folder and hrp
+                and type(snapshot) == "table" and snapshot.completed ~= true then
+                for _, step in ipairs(definition.Steps or {}) do
+                    local done = type(snapshot.steps) == "table" and snapshot.steps[step.Id] ~= nil
+                    if not done and type(BasementPuzzleConfig.resolve) == "function" then
+                        local model = BasementPuzzleConfig.resolve(folder, step.Model)
+                        local part = resolveWorldPart(model)
+                        local reach = tonumber(definition.InteractDistance) or 14
+                        local camera = workspace.CurrentCamera
+                        local direction = part and camera and (part.Position - camera.CFrame.Position) or nil
+                        local aimed = direction and direction.Magnitude > 0.001
+                            and camera.CFrame.LookVector:Dot(direction.Unit) >= (tonumber(definition.AimDot) or 0.88)
+                        if part and aimed and (part.Position - hrp.Position).Magnitude <= reach then
+                            lastAttemptAt = os.clock()
+                            pcall(function() actionRemote:FireServer("LeverPuzzle", step.Id) end)
+                            task.delay(0.4, function()
+                                if IsHubLoaded and PuzzleStateRemote then
+                                    pcall(function() PuzzleStateRemote:FireServer() end)
+                                end
+                            end)
+                            break
+                        end
+                    end
+                end
+            end
+        end
+    end
+end)
+table.insert(HubThreads, basementLeverThread)
+
 local farmThread = task.spawn(function()
     while IsHubLoaded do
         local equippedSlot = getCurrentEquippedSlot()
@@ -1343,7 +1494,11 @@ local farmThread = task.spawn(function()
         end
         task.wait(cooldown)
 
-        if HubState.AutoFarmHay and IS_GAMEPLAY and not isCurrentlySelling and not TntComboInProgress then
+        local basementExitReady = IS_BASEMENT and HubState.AutoWinNeedle
+            and LocalPlayer:GetAttribute("NeedleOwned") == true
+            and BasementPuzzlesFolder and BasementPuzzlesFolder:GetAttribute("EscapeReady") == true
+        if HubState.AutoFarmHay and IS_GAMEPLAY and not isCurrentlySelling
+            and not TntComboInProgress and not basementExitReady then
             local hrp = getHRP()
             local char = getCharacter()
 
@@ -1506,7 +1661,11 @@ table.insert(HubThreads, farmThread)
 local tntThread = task.spawn(function()
     while IsHubLoaded do
         task.wait(1)
-        if HubState.AutoUseTnt and IS_GAMEPLAY and not isCurrentlySelling and not TntComboInProgress then
+        local basementExitReady = IS_BASEMENT and HubState.AutoWinNeedle
+            and LocalPlayer:GetAttribute("NeedleOwned") == true
+            and BasementPuzzlesFolder and BasementPuzzlesFolder:GetAttribute("EscapeReady") == true
+        if HubState.AutoUseTnt and IS_GAMEPLAY and not isCurrentlySelling
+            and not TntComboInProgress and not basementExitReady then
             local hrp = getHRP()
             if hrp and isToolOwned("Tnt") then
                 local currentHay = getHayHeld()
@@ -1584,6 +1743,7 @@ end
 
 -- 8.3 AUTO-WIN NEEDLE ENGINE
 local lastNeedleMovementNoticeAt = 0
+local lastBasementHandInAt = 0
 local needleThread = task.spawn(function()
     while IsHubLoaded do
         task.wait(0.4)
@@ -1591,21 +1751,44 @@ local needleThread = task.spawn(function()
             local needleOwned = LocalPlayer:GetAttribute("NeedleOwned")
 
             if needleOwned then
-                equipToolSlot(SLOT_NEEDLE)
-                scanExactLandmarks()
-                local hrp = getHRP()
-                local farmerDistance = hrp and (hrp.Position - Landmarks.FarmerNPC).Magnitude or math.huge
-                if not HubState.NoTeleportMode or farmerDistance <= 12 then
-                    if not HubState.NoTeleportMode then
-                        teleportTo(Landmarks.FarmerNPC)
-                        task.wait(0.2)
+                if IS_BASEMENT then
+                    local escapeReady = BasementPuzzlesFolder and BasementPuzzlesFolder:GetAttribute("EscapeReady") == true
+                    if escapeReady then
+                        equipToolSlot(SLOT_NEEDLE)
+                        local trapdoorPart = findBasementTrapdoorPart()
+                        local hrp = getHRP()
+                        local distance = trapdoorPart and hrp and (hrp.Position - trapdoorPart.Position).Magnitude or math.huge
+                        if trapdoorPart and not HubState.NoTeleportMode and distance > 24 then
+                            teleportTo(trapdoorPart.Position)
+                            task.wait(0.2)
+                        end
+                        local readyToUnlock = LocalPlayer:GetAttribute("TrapdoorUnlockReady") == true
+                        if readyToUnlock and Remotes.NeedleHandIn
+                            and os.clock() - lastBasementHandInAt >= 1.2 then
+                            lastBasementHandInAt = os.clock()
+                            pcall(function() Remotes.NeedleHandIn:FireServer() end)
+                        elseif os.clock() - lastNeedleMovementNoticeAt >= 8 then
+                            lastNeedleMovementNoticeAt = os.clock()
+                            addLog("info", string.format("Saida liberada. Aproxime-se e mire a fechadura com a chave (%.0f studs).", distance))
+                        end
                     end
-                    if Remotes.NeedleHandIn then
-                        pcall(function() Remotes.NeedleHandIn:FireServer() end)
+                else
+                    equipToolSlot(SLOT_NEEDLE)
+                    scanExactLandmarks()
+                    local hrp = getHRP()
+                    local farmerDistance = hrp and (hrp.Position - Landmarks.FarmerNPC).Magnitude or math.huge
+                    if not HubState.NoTeleportMode or farmerDistance <= 12 then
+                        if not HubState.NoTeleportMode then
+                            teleportTo(Landmarks.FarmerNPC)
+                            task.wait(0.2)
+                        end
+                        if Remotes.NeedleHandIn then
+                            pcall(function() Remotes.NeedleHandIn:FireServer() end)
+                        end
+                    elseif os.clock() - lastNeedleMovementNoticeAt >= 8 then
+                        lastNeedleMovementNoticeAt = os.clock()
+                        addLog("info", string.format("Agulha coletada. Aproxime-se do fazendeiro para entregar sem teleporte (%.0f studs).", farmerDistance))
                     end
-                elseif os.clock() - lastNeedleMovementNoticeAt >= 8 then
-                    lastNeedleMovementNoticeAt = os.clock()
-                    addLog("info", string.format("Agulha coletada. Aproxime-se do fazendeiro para entregar sem teleporte (%.0f studs).", farmerDistance))
                 end
             else
                 local roundFolder = ReplicatedStorage:FindFirstChild("NeedleHaystack")
@@ -2159,6 +2342,15 @@ local espThread = task.spawn(function()
             end
         end
 
+        if IS_BASEMENT and HubState.BasementGuideESP then
+            local objectiveText, objectivePart = getBasementNextObjective()
+            if objectivePart and (objectiveText ~= "Encontre a chave no feno" or not HubState.NeedleESP) then
+                local distance = math.floor((myPos - objectivePart.Position).Magnitude)
+                updateBillboard("BasementObjective", objectivePart,
+                    objectiveText .. " [" .. distance .. " studs]", Color3.fromRGB(255, 190, 75))
+            end
+        end
+
         -- 2. Needle ESP
         if HubState.NeedleESP and IS_GAMEPLAY then
             -- "The Needle" in Workspace is map decoration. The live objective is
@@ -2169,7 +2361,8 @@ local espThread = task.spawn(function()
                 and findVisibleNeedleObjective() or nil
             if visibleNeedle then
                 local dist = math.floor((myPos - visibleNeedle.Position).Magnitude)
-                updateBillboard("Needle", visibleNeedle, "AGULHA [" .. dist .. " studs]", Color3.fromRGB(255, 230, 0))
+                local objectiveName = IS_BASEMENT and "CHAVE" or "AGULHA"
+                updateBillboard("Needle", visibleNeedle, objectiveName .. " [" .. dist .. " studs]", Color3.fromRGB(255, 230, 0))
             elseif targetHayId then
                 local haystack = workspace:FindFirstChild("HaystackClient")
                 if haystack then
@@ -3306,6 +3499,7 @@ local function buildNativeUI()
         -- MATCH MODE (ONLY GAMEPLAY FARMING & COMBAT FEATURES SHOWN)
         -- ==================================================================
         local farmTab = createTab("Automacao", "AUTO")
+        local basementTab = IS_BASEMENT and createTab("Porao", "CH2") or nil
         local shopTab = createTab("Loja", "SHOP")
         local playerTab = createTab("Jogador", "HERO")
         local teleTab = createTab("Viagem", "WARP")
@@ -3353,7 +3547,8 @@ local function buildNativeUI()
             HubState.AutoSell = val
             addLog("info", "Auto Sell: " .. tostring(val))
         end)
-        addNativeToggle(farmTab, "Auto coletar/entregar Agulha ao alcance", HubState.AutoWinNeedle, function(val)
+        addNativeToggle(farmTab, IS_BASEMENT and "Auto coletar chave / usar ao mirar fechadura"
+            or "Auto coletar/entregar Agulha ao alcance", HubState.AutoWinNeedle, function(val)
             HubState.AutoWinNeedle = val
             addLog("info", "Auto-Win Needle: " .. tostring(val))
         end)
@@ -3521,14 +3716,82 @@ local function buildNativeUI()
 
         -- 4. Visuals ESP Tab
         addNativeSection(espTab, "Destaques visuais", Color3.fromRGB(99, 102, 241))
-        addNativeToggle(espTab, "Needle ESP (Bright Yellow)", HubState.NeedleESP, function(val) HubState.NeedleESP = val end)
+        addNativeToggle(espTab, IS_BASEMENT and "Chave ESP (amarelo)" or "Needle ESP (Bright Yellow)",
+            HubState.NeedleESP, function(val) HubState.NeedleESP = val end)
         addNativeToggle(espTab, "Rare / RGB / Void Straw ESP (Magenta)", HubState.RgbESP, function(val) HubState.RgbESP = val end)
         addNativeToggle(espTab, "Gems ESP (Emerald Green)", HubState.GemESP, function(val) HubState.GemESP = val end)
         addNativeToggle(espTab, "Sell Cow ESP (Electric Blue)", HubState.SellESP, function(val) HubState.SellESP = val end)
         addNativeToggle(espTab, "Player ESP (White)", HubState.PlayerESP, function(val) HubState.PlayerESP = val end)
 
+        if basementTab then
+            addNativeSection(basementTab, "Capitulo 2: Porão", Color3.fromRGB(255, 190, 75))
+            addNativeParagraph(basementTab, "Fluxo do capitulo",
+                "Encontre a chave no feno, acione as alavancas, resolva os 3 puzzles exigidos e abra a saida. O progresso abaixo vem do estado replicado pelo jogo.",
+                Color3.fromRGB(255, 190, 75))
+            local keyCard = addNativeParagraph(basementTab, "Chave", "Carregando estado...", Color3.fromRGB(255, 190, 75))
+            local leverCard = addNativeParagraph(basementTab, "Alavancas", "Carregando estado...", Color3.fromRGB(255, 190, 75))
+            local puzzleCards = {}
+            for _, puzzleId in ipairs(BasementRequiredPuzzles) do
+                puzzleCards[puzzleId] = addNativeParagraph(basementTab,
+                    BasementPuzzleLabels[puzzleId] or puzzleId, "Sincronizando puzzle...", Color3.fromRGB(99, 102, 241))
+            end
+            local exitCard = addNativeParagraph(basementTab, "Saida", "Carregando estado...", Color3.fromRGB(52, 211, 153))
+            local nextCard = addNativeParagraph(basementTab, "Proximo objetivo", "Carregando estado...", Color3.fromRGB(255, 190, 75))
+            addNativeToggle(basementTab, "Destacar proximo objetivo no mapa", HubState.BasementGuideESP, function(val)
+                HubState.BasementGuideESP = val
+            end)
+            addNativeToggle(basementTab, "Auto acionar alavancas ao mirar", HubState.BasementAutoLevers, function(val)
+                HubState.BasementAutoLevers = val
+                addLog("info", "Alavancas automaticas: " .. tostring(val))
+            end)
+            addNativeButton(basementTab, "Sincronizar progresso dos puzzles", function()
+                if PuzzleStateRemote and PuzzleStateRemote:IsA("RemoteEvent") then
+                    pcall(function() PuzzleStateRemote:FireServer() end)
+                else
+                    addLog("warn", "PuzzleState nao esta disponivel neste servidor.")
+                end
+            end)
+            local basementStatusThread = task.spawn(function()
+                while IsHubLoaded and basementTab.Parent do
+                    local hayFolder = ReplicatedStorage:FindFirstChild("NeedleHaystack")
+                    local keyOwned = LocalPlayer:GetAttribute("NeedleOwned") == true
+                    local keyClaimed = hayFolder and hayFolder:GetAttribute("NeedleClaimed") == true
+                    keyCard.Text = keyOwned and "Chave em sua posse. Guarde-a para abrir a saida."
+                        or (keyClaimed and "Chave ja encontrada nesta rodada; nao esta em sua posse."
+                        or "Ainda oculta no feno. O destaque mostra a area quando o alvo aparece.")
+
+                    local pulled = 0
+                    for i = 1, 3 do
+                        if BasementPuzzlesFolder and BasementPuzzlesFolder:GetAttribute("Lever" .. i .. "Pulled") == true then
+                            pulled = pulled + 1
+                        end
+                    end
+                    leverCard.Text = string.format("%d/3 acionadas | %s", pulled,
+                        BasementPuzzlesFolder and BasementPuzzlesFolder:GetAttribute("LeverPuzzleSolved") == true
+                            and "concluido" or "pendente")
+
+                    local solved = BasementPuzzlesFolder and tonumber(BasementPuzzlesFolder:GetAttribute("SolvedPuzzleCount")) or 0
+                    local required = BasementPuzzlesFolder and tonumber(BasementPuzzlesFolder:GetAttribute("RequiredPuzzleCount"))
+                        or #BasementRequiredPuzzles
+                    for puzzleId, card in pairs(puzzleCards) do
+                        local state = BasementPuzzleSnapshot and BasementPuzzleSnapshot[puzzleId]
+                        card.Text = type(state) == "table" and (state.completed == true and "Concluido pelo servidor."
+                            or "Pendente. Interaja com as pistas e controles do puzzle.")
+                            or "Estado individual ainda nao sincronizado."
+                    end
+                    local escapeReady = BasementPuzzlesFolder and BasementPuzzlesFolder:GetAttribute("EscapeReady") == true
+                    local phase = BasementPuzzlesFolder and BasementPuzzlesFolder:GetAttribute("ReleasePhase") or "?"
+                    exitCard.Text = string.format("Puzzles: %d/%d | Saida: %s | Fase: %s", solved or 0,
+                        required or #BasementRequiredPuzzles, escapeReady and "liberada" or "bloqueada", tostring(phase))
+                    nextCard.Text = getBasementNextObjective()
+                    task.wait(1)
+                end
+            end)
+            table.insert(HubThreads, basementStatusThread)
+        end
+
         -- Default Match Tab Selection
-        selectTab("Automacao")
+        selectTab(IS_BASEMENT and "Porao" or "Automacao")
     end
 
     -- ==================================================================

@@ -1,7 +1,7 @@
 {
-  "version": "6.1",
-  "versionNumber": 61,
-  "gameCompatibility": "All Places (Lobby, Farmhouse, Basement) - Game Version v1068",
+  "version": "6.2",
+  "versionNumber": 62,
+  "gameCompatibility": "Lobby/Farmhouse v1068; Basement PlaceVersion 510 (dump 2026-09-13)",
   "releaseDate": "2026-09-13",
-  "releaseNotes": "Only collects the revealed real needle objective, labels its unrevealed hay area correctly, prioritizes circular digging around the known target and reachable hay edges, and aims TNT with a feasible ballistic throw before returning to the best tool. Remote farming beyond the game's existing range is not claimed."
+  "releaseNotes": "Adds a Basement chapter tab with live key, lever, puzzle and exit progress; highlights the next objective; optionally activates aimed nearby levers using the game's puzzle action; fixes key handling so it is used at the trapdoor only when the chapter is ready, without blocking harvest tools beforehand."
 }
