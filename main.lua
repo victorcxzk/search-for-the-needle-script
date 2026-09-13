@@ -84,6 +84,8 @@ else
     GAME_MODE_NAME = "Place " .. tostring(CURRENT_PLACE_ID)
 end
 local CURRENT_PLACE_NAME = GAME_MODE_NAME
+local SCRIPT_VERSION = "5.3"
+local CurrentContextMode = IS_LOBBY and "Lobby" or "Match"
 
 -- Require game Config if available for exact mathematical rainbow calculations
 local HaystackConfig = nil
@@ -1537,7 +1539,7 @@ local function unloadHub()
     addLog("info", "Needle Hub unloaded cleanly.")
 end
 
----- SECTION 9: USER INTERFACE (CYBER GLASS MODERN HUD v5.1)
+---- SECTION 9: USER INTERFACE (CYBER GLASS ADAPTIVE HUD v5.3)
 
 -- Helper: Smooth Tweening
 local function tweenGui(obj, props, duration, style, direction)
@@ -1648,9 +1650,43 @@ local function createFloatingToggleButton(toggleCallback)
     floatBtn.MouseButton1Click:Connect(toggleCallback)
 end
 
--- Primary Modern Native UI Builder
+-- Version & GitHub Update Status Store
+local RemoteScriptVersion = SCRIPT_VERSION
+local ScriptUpdateAvailable = false
+local ScriptUpdateNotice = "Verificando versao no GitHub..."
+
+local function checkForScriptUpdates(onFinished)
+    task.spawn(function()
+        local success, res = pcall(function()
+            return game:HttpGet("https://raw.githubusercontent.com/victorcxzk/search-for-the-needle-script/master/version.json")
+        end)
+        if success and res and res:find("version") then
+            local ver = res:match('"version"%s*:%s*"([^"]+)"')
+            if ver then
+                RemoteScriptVersion = ver
+                local vRemoteNum = tonumber(ver:gsub("%.", "")) or 0
+                local vLocalNum = tonumber(SCRIPT_VERSION:gsub("%.", "")) or 0
+                if vRemoteNum > vLocalNum then
+                    ScriptUpdateAvailable = true
+                    ScriptUpdateNotice = "Nova versao disponivel: v" .. ver .. " (Atual: v" .. SCRIPT_VERSION .. ")"
+                    addLog("warn", "Nova versao do script disponivel no GitHub: v" .. ver)
+                else
+                    ScriptUpdateAvailable = false
+                    ScriptUpdateNotice = "Script 100% Atualizado (v" .. SCRIPT_VERSION .. " PRO)"
+                    addLog("info", "Script esta na versao mais recente (v" .. SCRIPT_VERSION .. ")")
+                end
+            end
+        else
+            ScriptUpdateNotice = "v" .. SCRIPT_VERSION .. " (Nao foi possivel conectar ao GitHub)"
+        end
+        if onFinished then pcall(onFinished, ScriptUpdateNotice, ScriptUpdateAvailable) end
+    end)
+end
+
+-- Primary Modern Native UI Builder (Context-Aware: Lobby vs Match)
 local function buildNativeUI()
-    addLog("info", "Constructing Cyber Glass Modern Hub GUI v5.1...")
+    local isLobbyMode = (CurrentContextMode == "Lobby")
+    addLog("info", "Construindo UI Cyber Glass (" .. (isLobbyMode and "MODO LOBBY" or "MODO JOGO") .. ")...")
 
     if GlobalScreenGui then GlobalScreenGui:Destroy() end
 
@@ -1746,7 +1782,7 @@ local function buildNativeUI()
 
     -- Title Text
     local titleLabel = Instance.new("TextLabel")
-    titleLabel.Size = UDim2.fromOffset(130, 26)
+    titleLabel.Size = UDim2.fromOffset(105, 26)
     titleLabel.Position = UDim2.new(0, 48, 0.5, -13)
     titleLabel.BackgroundTransparency = 1
     titleLabel.Text = "NEEDLE HUB"
@@ -1758,8 +1794,8 @@ local function buildNativeUI()
 
     -- Version Tag Pill
     local verPill = Instance.new("Frame")
-    verPill.Size = UDim2.fromOffset(72, 20)
-    verPill.Position = UDim2.new(0, 175, 0.5, -10)
+    verPill.Size = UDim2.fromOffset(68, 20)
+    verPill.Position = UDim2.new(0, 158, 0.5, -10)
     verPill.BackgroundColor3 = Color3.fromRGB(30, 34, 52)
     verPill.BorderSizePixel = 0
     verPill.Parent = titleBar
@@ -1771,16 +1807,34 @@ local function buildNativeUI()
     local verLbl = Instance.new("TextLabel")
     verLbl.Size = UDim2.fromScale(1, 1)
     verLbl.BackgroundTransparency = 1
-    verLbl.Text = "v5.1 PRO"
+    verLbl.Text = "v" .. tostring(SCRIPT_VERSION) .. " PRO"
     verLbl.TextColor3 = Color3.fromRGB(165, 180, 252)
     verLbl.Font = Enum.Font.GothamBold
     verLbl.TextSize = 10
     verLbl.Parent = verPill
 
-    -- Status Pill (Match Type)
+    -- Game Version Pill (PlaceVersion Detector)
+    local gameVerPill = Instance.new("Frame")
+    gameVerPill.Size = UDim2.fromOffset(88, 20)
+    gameVerPill.Position = UDim2.new(0, 232, 0.5, -10)
+    gameVerPill.BackgroundColor3 = Color3.fromRGB(24, 28, 42)
+    gameVerPill.BorderSizePixel = 0
+    gameVerPill.Parent = titleBar
+    local gvc = Instance.new("UICorner") gvc.CornerRadius = UDim.new(0, 10) gvc.Parent = gameVerPill
+    local gvs = Instance.new("UIStroke") gvs.Color = Color3.fromRGB(60, 65, 95) gvs.Thickness = 1 gvs.Parent = gameVerPill
+    local gameVerLbl = Instance.new("TextLabel")
+    gameVerLbl.Size = UDim2.fromScale(1, 1)
+    gameVerLbl.BackgroundTransparency = 1
+    gameVerLbl.Text = "Game: v" .. tostring(game.PlaceVersion)
+    gameVerLbl.TextColor3 = Color3.fromRGB(210, 215, 235)
+    gameVerLbl.Font = Enum.Font.GothamMedium
+    gameVerLbl.TextSize = 10
+    gameVerLbl.Parent = gameVerPill
+
+    -- Status Pill (Match vs Lobby Context)
     local statusPill = Instance.new("Frame")
-    statusPill.Size = UDim2.fromOffset(140, 20)
-    statusPill.Position = UDim2.new(0, 255, 0.5, -10)
+    statusPill.Size = UDim2.fromOffset(132, 20)
+    statusPill.Position = UDim2.new(0, 326, 0.5, -10)
     statusPill.BackgroundColor3 = Color3.fromRGB(20, 26, 36)
     statusPill.BorderSizePixel = 0
     statusPill.Parent = titleBar
@@ -1788,15 +1842,15 @@ local function buildNativeUI()
     local statusDot = Instance.new("Frame")
     statusDot.Size = UDim2.fromOffset(6, 6)
     statusDot.Position = UDim2.new(0, 8, 0.5, -3)
-    statusDot.BackgroundColor3 = IS_GAMEPLAY and Color3.fromRGB(34, 197, 94) or Color3.fromRGB(56, 189, 248)
+    statusDot.BackgroundColor3 = (CurrentContextMode == "Match") and Color3.fromRGB(34, 197, 94) or Color3.fromRGB(56, 189, 248)
     statusDot.BorderSizePixel = 0
     statusDot.Parent = statusPill
     local sdc = Instance.new("UICorner") sdc.CornerRadius = UDim.new(1, 0) sdc.Parent = statusDot
     local statusLbl = Instance.new("TextLabel")
-    statusLbl.Size = UDim2.new(1, -22, 1, 0)
+    statusLbl.Size = UDim2.new(1, -20, 1, 0)
     statusLbl.Position = UDim2.fromOffset(18, 0)
     statusLbl.BackgroundTransparency = 1
-    statusLbl.Text = tostring(CURRENT_PLACE_NAME or GAME_MODE_NAME or "Match")
+    statusLbl.Text = (CurrentContextMode == "Match") and ("MATCH: " .. tostring(GAME_MODE_NAME)) or "LOBBY MODE"
     statusLbl.TextColor3 = Color3.fromRGB(200, 210, 230)
     statusLbl.Font = Enum.Font.GothamMedium
     statusLbl.TextSize = 10
@@ -1907,14 +1961,17 @@ local function buildNativeUI()
     sidebar.Size = UDim2.new(0, 155, 1, 0)
     sidebar.BackgroundColor3 = Color3.fromRGB(15, 16, 24)
     sidebar.BorderSizePixel = 0
+    sidebar.ClipsDescendants = false
     sidebar.Parent = bodyContainer
 
+    -- Separator line between sidebar and content area (Parented to bodyContainer, NOT sidebar!)
     local sidebarSep = Instance.new("Frame")
+    sidebarSep.Name = "SidebarDivider"
     sidebarSep.Size = UDim2.new(0, 1, 1, 0)
-    sidebarSep.Position = UDim2.new(1, -1, 0, 0)
+    sidebarSep.Position = UDim2.fromOffset(155, 0)
     sidebarSep.BackgroundColor3 = Color3.fromRGB(32, 35, 48)
     sidebarSep.BorderSizePixel = 0
-    sidebarSep.Parent = sidebar
+    sidebarSep.Parent = bodyContainer
 
     local sidebarLayout = Instance.new("UIListLayout")
     sidebarLayout.Padding = UDim.new(0, 5)
@@ -1923,20 +1980,21 @@ local function buildNativeUI()
     sidebarLayout.Parent = sidebar
 
     local sidebarPadding = Instance.new("UIPadding")
-    sidebarPadding.PaddingTop = UDim.new(0, 12)
+    sidebarPadding.PaddingTop = UDim.new(0, 10)
     sidebarPadding.Parent = sidebar
 
     -- Content Area
     local contentArea = Instance.new("Frame")
     contentArea.Name = "ContentArea"
-    contentArea.Size = UDim2.new(1, -155, 1, 0)
-    contentArea.Position = UDim2.fromOffset(155, 0)
+    contentArea.Size = UDim2.new(1, -156, 1, 0)
+    contentArea.Position = UDim2.fromOffset(156, 0)
     contentArea.BackgroundTransparency = 1
     contentArea.Parent = bodyContainer
 
     local tabFrames = {}
     local tabButtons = {}
     local tabIndicators = {}
+    local tabOrderCounter = 0
 
     local function selectTab(tabName)
         for name, frame in pairs(tabFrames) do
@@ -1955,15 +2013,18 @@ local function buildNativeUI()
     end
 
     local function createTab(tabName, badgeTag)
+        tabOrderCounter = tabOrderCounter + 1
         local btn = Instance.new("TextButton")
-        btn.Size = UDim2.new(0.92, 0, 0, 36)
+        btn.Name = "TabBtn_" .. tabName
+        btn.Size = UDim2.new(0.92, 0, 0, 35)
         btn.BackgroundColor3 = Color3.fromRGB(20, 22, 32)
         btn.Text = "  " .. tabName
         btn.TextColor3 = Color3.fromRGB(155, 160, 180)
         btn.Font = Enum.Font.GothamBold
-        btn.TextSize = 12
+        btn.TextSize = 11
         btn.TextXAlignment = Enum.TextXAlignment.Left
         btn.AutoButtonColor = false
+        btn.LayoutOrder = tabOrderCounter
         btn.Parent = sidebar
 
         local btnCorner = Instance.new("UICorner")
@@ -2143,7 +2204,6 @@ local function buildNativeUI()
             setToggle(not currentVal)
         end)
 
-        -- Row hover effect
         frame.MouseEnter:Connect(function()
             tweenGui(frame, {BackgroundColor3 = Color3.fromRGB(24, 27, 40)}, 0.15)
             tweenGui(s, {Color = Color3.fromRGB(56, 62, 90)}, 0.15)
@@ -2223,7 +2283,6 @@ local function buildNativeUI()
         lbl.TextXAlignment = Enum.TextXAlignment.Left
         lbl.Parent = frame
 
-        -- Value Badge Pill
         local valBadge = Instance.new("Frame")
         valBadge.Size = UDim2.fromOffset(52, 20)
         valBadge.Position = UDim2.new(1, -66, 0, 7)
@@ -2241,7 +2300,6 @@ local function buildNativeUI()
         valLbl.TextSize = 11
         valLbl.Parent = valBadge
 
-        -- Track Bar
         local barBg = Instance.new("Frame")
         barBg.Size = UDim2.new(1, -28, 0, 6)
         barBg.Position = UDim2.fromOffset(14, 38)
@@ -2263,16 +2321,6 @@ local function buildNativeUI()
             ColorSequenceKeypoint.new(1, Color3.fromRGB(168, 85, 247))
         })
         fg.Parent = fill
-
-        -- Draggable Round Thumb
-        local thumb = Instance.new("Frame")
-        thumb.Size = UDim2.fromOffset(14, 14)
-        thumb.Position = UDim2.new(1, -7, 0.5, -7)
-        thumb.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
-        thumb.BorderSizePixel = 0
-        thumb.Parent = fill
-        local tc = Instance.new("UICorner") tc.CornerRadius = UDim.new(1, 0) tc.Parent = thumb
-        local ts = Instance.new("UIStroke") ts.Color = Color3.fromRGB(99, 102, 241) ts.Thickness = 1.5 ts.Parent = thumb
 
         local isDraggingSlider = false
         local function updateVal(input)
@@ -2304,7 +2352,7 @@ local function buildNativeUI()
     -- UI Component: Modern Info / Status Card
     local function addNativeParagraph(parent, title, content)
         local frame = Instance.new("Frame")
-        frame.Size = UDim2.new(0.96, 0, 0, 62)
+        frame.Size = UDim2.new(0.96, 0, 0, 64)
         frame.BackgroundColor3 = Color3.fromRGB(20, 22, 32)
         frame.BorderSizePixel = 0
         frame.Parent = parent
@@ -2315,7 +2363,6 @@ local function buildNativeUI()
         s.Thickness = 1
         s.Parent = frame
 
-        -- Left Accent Line
         local accent = Instance.new("Frame")
         accent.Size = UDim2.new(0, 3, 0.7, 0)
         accent.Position = UDim2.new(0, 4, 0.15, 0)
@@ -2336,7 +2383,7 @@ local function buildNativeUI()
         tLbl.Parent = frame
 
         local cLbl = Instance.new("TextLabel")
-        cLbl.Size = UDim2.new(1, -24, 0, 32)
+        cLbl.Size = UDim2.new(1, -24, 0, 34)
         cLbl.Position = UDim2.fromOffset(14, 26)
         cLbl.BackgroundTransparency = 1
         cLbl.Text = content
@@ -2351,275 +2398,593 @@ local function buildNativeUI()
         return cLbl
     end
 
-    -- Construct Tabs with Modern Badges
-    local farmTab = createTab("Auto Farm", "FARM")
-    local playerTab = createTab("Player", "HERO")
-    local teleTab = createTab("Teleport", "WARP")
-    local espTab = createTab("Visuals ESP", "ESP")
-    local lobbyTab = createTab("Lobby", "HUB")
-    local consoleTab = createTab("Console", "LOGS")
-    local setTab = createTab("Settings", "CFG")
+    -- UI Component: Modern Text Input Box with Action Button
+    local function addNativeInput(parent, placeholder, btnText, callback)
+        local frame = Instance.new("Frame")
+        frame.Size = UDim2.new(0.96, 0, 0, 42)
+        frame.BackgroundColor3 = Color3.fromRGB(20, 22, 32)
+        frame.BorderSizePixel = 0
+        frame.Parent = parent
 
-    -- Tab 1: Auto Farm
-    addNativeSection(farmTab, "Harvest Automation")
-    addNativeToggle(farmTab, "Auto Collect Hay (Multi-Grab)", HubState.AutoFarmHay, function(val)
-        HubState.AutoFarmHay = val
-        addLog("info", "Auto Farm Hay: " .. tostring(val))
-    end)
-    addNativeToggle(farmTab, "Auto-Equip Best Tool (Vacuum/Pitchfork)", HubState.AutoEquipBestTool, function(val)
-        HubState.AutoEquipBestTool = val
-        if val then
+        local c = Instance.new("UICorner") c.CornerRadius = UDim.new(0, 8) c.Parent = frame
+        local s = Instance.new("UIStroke")
+        s.Color = Color3.fromRGB(36, 40, 58)
+        s.Thickness = 1
+        s.Parent = frame
+
+        local textBox = Instance.new("TextBox")
+        textBox.Size = UDim2.new(1, -90, 1, -8)
+        textBox.Position = UDim2.fromOffset(10, 4)
+        textBox.BackgroundColor3 = Color3.fromRGB(14, 16, 24)
+        textBox.Text = ""
+        textBox.PlaceholderText = placeholder
+        textBox.TextColor3 = Color3.fromRGB(240, 245, 255)
+        textBox.PlaceholderColor3 = Color3.fromRGB(120, 125, 145)
+        textBox.Font = Enum.Font.GothamMedium
+        textBox.TextSize = 11
+        textBox.TextXAlignment = Enum.TextXAlignment.Left
+        textBox.ClearTextOnFocus = false
+        textBox.Parent = frame
+        local tbc = Instance.new("UICorner") tbc.CornerRadius = UDim.new(0, 6) tbc.Parent = textBox
+
+        local btn = Instance.new("TextButton")
+        btn.Size = UDim2.fromOffset(68, 28)
+        btn.Position = UDim2.new(1, -74, 0.5, -14)
+        btn.BackgroundColor3 = Color3.fromRGB(79, 70, 229)
+        btn.Text = btnText or "Submit"
+        btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+        btn.Font = Enum.Font.GothamBold
+        btn.TextSize = 11
+        btn.AutoButtonColor = false
+        btn.Parent = frame
+        local bc = Instance.new("UICorner") bc.CornerRadius = UDim.new(0, 6) bc.Parent = btn
+
+        btn.MouseButton1Click:Connect(function()
+            callback(textBox.Text)
+        end)
+    end
+
+    ----------------------------------------------------------------------
+    -- ADAPTIVE CONTEXT TABS CONSTRUCTION
+    ----------------------------------------------------------------------
+
+    if isLobbyMode then
+        -- ==================================================================
+        -- LOBBY MODE (ONLY LOBBY FEATURES SHOWN)
+        -- ==================================================================
+        local lobbyTab = createTab("Lobby Hub", "HUB")
+        local playerTab = createTab("Player", "HERO")
+        local warpTab = createTab("Match Warp", "WARP")
+        local consoleTab = createTab("Console", "LOGS")
+        local setTab = createTab("Settings", "CFG")
+
+        -- 1. Lobby Hub Tab
+        addNativeSection(lobbyTab, "Class System & Spins")
+        local classStatusCard = addNativeParagraph(lobbyTab, "Active Class & Gems",
+            string.format("Class: [%s] | Gems: %s | Target: [%s]",
+                tostring(LocalPlayer:GetAttribute("ActiveClass") or "Starter"),
+                tostring(LocalPlayer:GetAttribute("Gems") or 0),
+                HubState.TargetClass))
+
+        task.spawn(function()
+            while IsHubLoaded do
+                task.wait(1.5)
+                pcall(function()
+                    if classStatusCard and classStatusCard.Parent then
+                        classStatusCard.Text = string.format("Class: [%s] | Gems: %s | Target: [%s]",
+                            tostring(LocalPlayer:GetAttribute("ActiveClass") or "Starter"),
+                            tostring(LocalPlayer:GetAttribute("Gems") or 0),
+                            HubState.TargetClass)
+                    end
+                end)
+            end
+        end)
+
+        addNativeToggle(lobbyTab, "Auto-Roll Class (Stops when Target Reached)", HubState.AutoRollClass, function(val)
+            HubState.AutoRollClass = val
+            addLog("info", "Auto-Roll Class: " .. tostring(val))
+            if val then
+                task.spawn(function()
+                    while IsHubLoaded and HubState.AutoRollClass do
+                        task.wait(0.6)
+                        if Remotes.RollClass and IS_LOBBY then
+                            local gems = LocalPlayer:GetAttribute("Gems") or 0
+                            if gems < 40 then
+                                HubState.AutoRollClass = false
+                                addLog("warn", "Gemas insuficientes para rolar classe (Gemas: " .. gems .. " / 40). Auto-Roll pausado.")
+                                break
+                            end
+                            local ok, res = pcall(function() return Remotes.RollClass:InvokeServer() end)
+                            local curClass = tostring(LocalPlayer:GetAttribute("ActiveClass") or res or "")
+                            addLog("info", "Rerolled Class: " .. curClass)
+                            if curClass:lower():find(HubState.TargetClass:lower()) then
+                                addLog("info", "CLASSE ALVO OBTIDA: " .. curClass .. "! Auto-Roll encerrado com sucesso.")
+                                HubState.AutoRollClass = false
+                                break
+                            end
+                        end
+                    end
+                end)
+            end
+        end)
+
+        addNativeButton(lobbyTab, "Roll Class Once (Manual - 40 Gems)", function()
+            if Remotes.RollClass then
+                local res = Remotes.RollClass:InvokeServer()
+                addLog("info", "Manual Class Roll: " .. tostring(res or LocalPlayer:GetAttribute("ActiveClass")))
+            end
+        end)
+
+        addNativeSection(lobbyTab, "Target Class Quick-Pick")
+        addNativeButton(lobbyTab, "Target: Ultimate Farmer (0.1% Mythic)", function()
+            HubState.TargetClass = "Ultimate Farmer"
+            addLog("info", "Target Class definida como: Ultimate Farmer")
+        end)
+        addNativeButton(lobbyTab, "Target: Drone Specialist (1% Legendary)", function()
+            HubState.TargetClass = "Drone Specialist"
+            addLog("info", "Target Class definida como: Drone Specialist")
+        end)
+        addNativeButton(lobbyTab, "Target: Prospector (3.9% Epic)", function()
+            HubState.TargetClass = "Prospector"
+            addLog("info", "Target Class definida como: Prospector")
+        end)
+        addNativeButton(lobbyTab, "Target: Demolitionist (7% Rare)", function()
+            HubState.TargetClass = "Demolitionist"
+            addLog("info", "Target Class definida como: Demolitionist")
+        end)
+        addNativeButton(lobbyTab, "Target: Forkmaster (9% Rare)", function()
+            HubState.TargetClass = "Forkmaster"
+            addLog("info", "Target Class definida como: Forkmaster")
+        end)
+        addNativeButton(lobbyTab, "Target: Hay Merchant (14% Uncommon)", function()
+            HubState.TargetClass = "Hay Merchant"
+            addLog("info", "Target Class definida como: Hay Merchant")
+        end)
+        addNativeButton(lobbyTab, "Target: Pack Mule (25% Common)", function()
+            HubState.TargetClass = "Pack Mule"
+            addLog("info", "Target Class definida como: Pack Mule")
+        end)
+
+        addNativeSection(lobbyTab, "Class Slots")
+        addNativeButton(lobbyTab, "Equip Class Slot 1", function()
+            if Remotes.SelectClassSlot then Remotes.SelectClassSlot:InvokeServer(1) addLog("info", "Equipped Class Slot 1") end
+        end)
+        addNativeButton(lobbyTab, "Equip Class Slot 2", function()
+            if Remotes.SelectClassSlot then Remotes.SelectClassSlot:InvokeServer(2) addLog("info", "Equipped Class Slot 2") end
+        end)
+        addNativeButton(lobbyTab, "Equip Class Slot 3", function()
+            if Remotes.SelectClassSlot then Remotes.SelectClassSlot:InvokeServer(3) addLog("info", "Equipped Class Slot 3") end
+        end)
+
+        addNativeSection(lobbyTab, "Codes & Free Rewards")
+        addNativeButton(lobbyTab, "Redeem All Known Codes (11 Codes Batch)", function()
+            redeemAllCodes("")
+        end, true)
+        addNativeInput(lobbyTab, "Insira codigo customizado...", "Resgatar", function(txt)
+            if txt and txt ~= "" then
+                redeemAllCodes(txt)
+            end
+        end)
+
+        addNativeSection(lobbyTab, "Pets & Companions")
+        addNativeButton(lobbyTab, "Equip Cow Pet (Sells in Place + 120 Cap)", function()
+            if Remotes.EquipPet then
+                Remotes.EquipPet:InvokeServer("Cow")
+                addLog("info", "Equipado: Cow Pet")
+            end
+        end)
+        addNativeButton(lobbyTab, "Equip Chicken Pet (30 Cap + 6 Take)", function()
+            if Remotes.EquipPet then
+                Remotes.EquipPet:InvokeServer("Chicken")
+                addLog("info", "Equipado: Chicken Pet")
+            end
+        end)
+
+        addNativeSection(lobbyTab, "Chests & Event Rewards")
+        addNativeButton(lobbyTab, "Open All Event Chests (Batch x10)", function()
+            if Remotes.OpenChest then
+                for i = 1, 10 do
+                    pcall(function() Remotes.OpenChest:InvokeServer() end)
+                    task.wait(0.2)
+                end
+                addLog("info", "Lote de baus aberto com sucesso.")
+            end
+        end)
+
+        addNativeSection(lobbyTab, "Lobby Navigation & Portals")
+        addNativeButton(lobbyTab, "Teleport to Match Circle (Join Game)", function()
+            local hrp = getHRP()
+            if hrp then
+                -- Scan for match circles
+                local found = false
+                for _, obj in ipairs(workspace:GetDescendants()) do
+                    if obj:IsA("BasePart") and (obj.Name:lower():find("portal") or obj.Name:lower():find("circle") or obj.Name:lower():find("teleport") or obj.Name:lower():find("pad")) then
+                        hrp.CFrame = obj.CFrame + Vector3.new(0, 3, 0)
+                        addLog("info", "Teleported to Match Circle: " .. obj.Name)
+                        found = true
+                        break
+                    end
+                end
+                if not found then
+                    hrp.CFrame = CFrame.new(-38, 5, -8)
+                    addLog("info", "Teleported to default Match Circle area.")
+                end
+            end
+        end)
+        addNativeButton(lobbyTab, "Teleport to Pet Shop", function()
+            local hrp = getHRP()
+            if hrp then hrp.CFrame = CFrame.new(20, 5, -30) addLog("info", "Teleported to Pet Shop area.") end
+        end)
+        addNativeButton(lobbyTab, "Teleport to Class Pedestal", function()
+            local hrp = getHRP()
+            if hrp then hrp.CFrame = CFrame.new(-10, 5, 25) addLog("info", "Teleported to Class Pedestal area.") end
+        end)
+
+        -- 2. Match Warp Tab
+        addNativeSection(warpTab, "Direct Match Teleports")
+        addNativeButton(warpTab, "Direct Teleport to Farmhouse Match (ID 108628039999641)", function()
+            addLog("info", "Teleporting to Farmhouse Match...")
+            TeleportService:Teleport(FARMHOUSE_PLACE_ID, LocalPlayer)
+        end, true)
+        addNativeButton(warpTab, "Direct Teleport to Basement Match (ID 83445806734780)", function()
+            addLog("info", "Teleporting to Basement Match...")
+            TeleportService:Teleport(BASEMENT_PLACE_ID, LocalPlayer)
+        end)
+
+        addNativeSection(warpTab, "Server Routing")
+        addNativeButton(warpTab, "Server Hop (Find New Lobby)", function()
+            addLog("info", "Searching for alternate Lobby server...")
+            TeleportService:Teleport(LOBBY_PLACE_ID, LocalPlayer)
+        end)
+        addNativeButton(warpTab, "Rejoin Current Lobby Server", function()
+            TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, LocalPlayer)
+        end)
+
+        -- Default Lobby Tab Selection
+        selectTab("Lobby Hub")
+
+    else
+        -- ==================================================================
+        -- MATCH MODE (ONLY GAMEPLAY FARMING & COMBAT FEATURES SHOWN)
+        -- ==================================================================
+        local farmTab = createTab("Auto Farm", "FARM")
+        local playerTab = createTab("Player", "HERO")
+        local teleTab = createTab("Teleport", "WARP")
+        local espTab = createTab("Visuals ESP", "ESP")
+        local consoleTab = createTab("Console", "LOGS")
+        local setTab = createTab("Settings", "CFG")
+
+        -- 1. Auto Farm Tab
+        addNativeSection(farmTab, "Harvest Automation")
+        addNativeToggle(farmTab, "Auto Collect Hay (Multi-Grab)", HubState.AutoFarmHay, function(val)
+            HubState.AutoFarmHay = val
+            addLog("info", "Auto Farm Hay: " .. tostring(val))
+        end)
+        addNativeToggle(farmTab, "Auto-Equip Best Tool (Vacuum/Pitchfork)", HubState.AutoEquipBestTool, function(val)
+            HubState.AutoEquipBestTool = val
+            if val then
+                local bestSlot = getBestAvailableToolSlot()
+                equipToolSlot(bestSlot)
+            end
+            addLog("info", "Auto-Equip Best Tool: " .. tostring(val))
+        end)
+        addNativeToggle(farmTab, "Auto-Use TNT (Explosive Cleaver)", HubState.AutoUseTnt, function(val)
+            HubState.AutoUseTnt = val
+            addLog("info", "Auto-Use TNT: " .. tostring(val))
+        end)
+        addNativeSlider(farmTab, "Auto-TNT Interval (Seconds)", 8, 30, HubState.TntInterval, function(val)
+            HubState.TntInterval = val
+        end)
+        addNativeToggle(farmTab, "Prioritize RGB / Rare Straws (10x Value)", HubState.PrioritizeRGB, function(val)
+            HubState.PrioritizeRGB = val
+            addLog("info", "Prioritize RGB: " .. tostring(val))
+        end)
+        addNativeToggle(farmTab, "Auto Collect Gems", HubState.AutoCollectGems, function(val)
+            HubState.AutoCollectGems = val
+            addLog("info", "Auto Collect Gems: " .. tostring(val))
+        end)
+        addNativeToggle(farmTab, "Auto Sell when Bag is Full", HubState.AutoSell, function(val)
+            HubState.AutoSell = val
+            addLog("info", "Auto Sell: " .. tostring(val))
+        end)
+        addNativeToggle(farmTab, "Auto-Win Needle (Farmer Hand-In)", HubState.AutoWinNeedle, function(val)
+            HubState.AutoWinNeedle = val
+            addLog("info", "Auto-Win Needle: " .. tostring(val))
+        end)
+        addNativeToggle(farmTab, "Auto Deploy Drone", HubState.AutoDeployDrone, function(val)
+            HubState.AutoDeployDrone = val
+        end)
+        addNativeToggle(farmTab, "Auto Buy Tools & Upgrades", HubState.AutoBuyUpgrades, function(val)
+            HubState.AutoBuyUpgrades = val
+        end)
+
+        addNativeSection(farmTab, "Tool Recognition Status")
+        local toolStatusLbl = addNativeParagraph(farmTab, "Dynamic Tool Recognition", getToolStatusSummary())
+        task.spawn(function()
+            while IsHubLoaded do
+                task.wait(1.2)
+                pcall(function()
+                    if toolStatusLbl and toolStatusLbl.Parent then
+                        toolStatusLbl.Text = getToolStatusSummary()
+                    end
+                end)
+            end
+        end)
+
+        addNativeSection(farmTab, "Manual Tool Overrides")
+        addNativeButton(farmTab, "Auto-Select Best Available Tool", function()
+            HubState.ForcedToolSlot = 0
             local bestSlot = getBestAvailableToolSlot()
             equipToolSlot(bestSlot)
-        end
-        addLog("info", "Auto-Equip Best Tool: " .. tostring(val))
-    end)
-    addNativeToggle(farmTab, "Auto-Use TNT (Explosive Cleaver)", HubState.AutoUseTnt, function(val)
-        HubState.AutoUseTnt = val
-        addLog("info", "Auto-Use TNT: " .. tostring(val))
-    end)
-    addNativeSlider(farmTab, "Auto-TNT Interval (Seconds)", 8, 30, HubState.TntInterval, function(val)
-        HubState.TntInterval = val
-    end)
-    addNativeToggle(farmTab, "Prioritize RGB / Rare Straws (10x Value)", HubState.PrioritizeRGB, function(val)
-        HubState.PrioritizeRGB = val
-        addLog("info", "Prioritize RGB: " .. tostring(val))
-    end)
-    addNativeToggle(farmTab, "Auto Collect Gems", HubState.AutoCollectGems, function(val)
-        HubState.AutoCollectGems = val
-        addLog("info", "Auto Collect Gems: " .. tostring(val))
-    end)
-    addNativeToggle(farmTab, "Auto Sell when Bag is Full", HubState.AutoSell, function(val)
-        HubState.AutoSell = val
-        addLog("info", "Auto Sell: " .. tostring(val))
-    end)
-    addNativeToggle(farmTab, "Auto-Win Needle (Farmer Hand-In)", HubState.AutoWinNeedle, function(val)
-        HubState.AutoWinNeedle = val
-        addLog("info", "Auto-Win Needle: " .. tostring(val))
-    end)
-    addNativeToggle(farmTab, "Auto Deploy Drone", HubState.AutoDeployDrone, function(val)
-        HubState.AutoDeployDrone = val
-    end)
-    addNativeToggle(farmTab, "Auto Buy Tools & Upgrades", HubState.AutoBuyUpgrades, function(val)
-        HubState.AutoBuyUpgrades = val
-    end)
+            addLog("info", "Reset tool selection to Auto: Equipped Slot " .. bestSlot)
+        end)
+        addNativeButton(farmTab, "Throw TNT Now (Instant Blast)", function()
+            local hrp = getHRP()
+            if hrp then
+                local target = nil
+                local rgbStrands = getAllRainbowStrands()
+                if #rgbStrands > 0 then
+                    target = rgbStrands[1].Position
+                else
+                    target = Landmarks.HayCenter or (hrp.Position + hrp.CFrame.LookVector * 18)
+                end
+                throwTntAt(target)
+            end
+        end, true)
+        addNativeButton(farmTab, "Equip Vacuum (Slot 5)", function()
+            HubState.ForcedToolSlot = SLOT_VACUUM
+            equipToolSlot(SLOT_VACUUM)
+        end)
+        addNativeButton(farmTab, "Equip Pitchfork (Slot 3)", function()
+            HubState.ForcedToolSlot = SLOT_PITCHFORK
+            equipToolSlot(SLOT_PITCHFORK)
+        end)
+        addNativeButton(farmTab, "Equip TNT (Slot 2)", function()
+            HubState.ForcedToolSlot = SLOT_TNT
+            equipToolSlot(SLOT_TNT)
+        end)
+        addNativeButton(farmTab, "Equip Hand (Slot 1)", function()
+            HubState.ForcedToolSlot = SLOT_HAND
+            equipToolSlot(SLOT_HAND)
+        end)
+        addNativeButton(farmTab, "Deploy Drone Now (Slot 4)", function()
+            if Remotes.DeployDrone then
+                pcall(function() Remotes.DeployDrone:FireServer() end)
+                addLog("info", "Fired DeployDrone command")
+            end
+        end)
 
-    addNativeSection(farmTab, "Tool Recognition Status")
-    local toolStatusLbl = addNativeParagraph(farmTab, "Dynamic Tool Recognition", getToolStatusSummary())
-    task.spawn(function()
-        while IsHubLoaded do
-            task.wait(1.2)
-            pcall(function()
-                if toolStatusLbl and toolStatusLbl.Parent then
-                    toolStatusLbl.Text = getToolStatusSummary()
+        addNativeSection(farmTab, "Quick Actions")
+        addNativeButton(farmTab, "Sell Hay Now (Instant Teleport)", function()
+            teleportTo(Landmarks.SellCow)
+            task.wait(0.2)
+            if Remotes.SellHay then Remotes.SellHay:FireServer() end
+            addLog("info", "Executed instant sell.")
+        end, true)
+
+        -- 2. Teleport Tab
+        addNativeSection(teleTab, "Map Landmarks")
+        addNativeButton(teleTab, "Teleport to Hay Mound", function()
+            teleportTo(Landmarks.HayCenter)
+            addLog("info", "Teleported to Hay Mound")
+        end)
+        addNativeButton(teleTab, "Teleport to Sell Cow", function()
+            teleportTo(Landmarks.SellCow)
+            addLog("info", "Teleported to Sell Cow")
+        end)
+        addNativeButton(teleTab, "Teleport to Farmer NPC", function()
+            teleportTo(Landmarks.FarmerNPC)
+            addLog("info", "Teleported to Farmer NPC")
+        end)
+        addNativeButton(teleTab, "Teleport to Needle (If Found)", function()
+            if Landmarks.NeedleCFrame then
+                teleportTo(Landmarks.NeedleCFrame)
+                addLog("info", "Teleported to Needle CFrame")
+            else
+                addLog("warn", "Needle location is not yet known.")
+            end
+        end)
+        addNativeButton(teleTab, "Return to Lobby", function()
+            if Remotes.ReturnToLobby then
+                Remotes.ReturnToLobby:FireServer()
+                addLog("info", "Requested return to lobby.")
+            else
+                TeleportService:Teleport(LOBBY_PLACE_ID, LocalPlayer)
+            end
+        end)
+
+        -- 3. Visuals ESP Tab
+        addNativeSection(espTab, "Visual ESP Trackers")
+        addNativeToggle(espTab, "Needle ESP (Bright Yellow)", HubState.NeedleESP, function(val) HubState.NeedleESP = val end)
+        addNativeToggle(espTab, "Rainbow / RGB Straw ESP (Magenta)", HubState.RgbESP, function(val) HubState.RgbESP = val end)
+        addNativeToggle(espTab, "Gems ESP (Emerald Green)", HubState.GemESP, function(val) HubState.GemESP = val end)
+        addNativeToggle(espTab, "Sell Cow ESP (Electric Blue)", HubState.SellESP, function(val) HubState.SellESP = val end)
+        addNativeToggle(espTab, "Player ESP (White)", HubState.PlayerESP, function(val) HubState.PlayerESP = val end)
+
+        -- Default Match Tab Selection
+        selectTab("Auto Farm")
+    end
+
+    -- ==================================================================
+    -- COMMON TABS (BUILT IN BOTH LOBBY AND MATCH)
+    -- ==================================================================
+
+    -- Common: Player Tab
+    local playerTab = tabFrames["Player"]
+    if playerTab then
+        addNativeSection(playerTab, "Camera & Mouse Freedom")
+        addNativeToggle(playerTab, "Unlock Camera (3rd Person)", HubState.UnlockCamera, function(val)
+            HubState.UnlockCamera = val
+            applyCameraAndMouse()
+        end)
+        addNativeToggle(playerTab, "Free Mouse (Hold RMB to Look)", HubState.FreeMouse, function(val)
+            HubState.FreeMouse = val
+            applyCameraAndMouse()
+        end)
+        addNativeButton(playerTab, "Snap 3rd Person Camera (Zoom Out)", function()
+            forceSnap3rdPerson(22)
+        end)
+        addNativeSlider(playerTab, "Camera Zoom Distance", 5, 80, HubState.CameraZoomDistance, function(val)
+            HubState.CameraZoomDistance = val
+            forceSnap3rdPerson(val)
+        end)
+
+        addNativeSection(playerTab, "Movement & Speed")
+        addNativeToggle(playerTab, "Custom WalkSpeed", HubState.WalkSpeedEnabled, function(val)
+            HubState.WalkSpeedEnabled = val
+            if not val then
+                local hum = getHumanoid()
+                if hum then hum.WalkSpeed = IS_LOBBY and 20 or 16 end
+            end
+        end)
+        addNativeSlider(playerTab, "WalkSpeed Value", 16, 250, math.floor(HubState.WalkSpeed), function(val)
+            HubState.WalkSpeed = val
+        end)
+        addNativeToggle(playerTab, "Custom JumpHeight", HubState.JumpHeightEnabled, function(val)
+            HubState.JumpHeightEnabled = val
+            if not val then
+                local hum = getHumanoid()
+                if hum then hum.JumpHeight = 7.2 end
+            end
+        end)
+        addNativeSlider(playerTab, "JumpHeight Value", 7, 100, math.floor(HubState.JumpHeight), function(val)
+            HubState.JumpHeight = val
+        end)
+
+        addNativeSection(playerTab, "Physics & Flight")
+        addNativeToggle(playerTab, "Fly (WASD + Space/Shift)", HubState.FlyEnabled, function(val)
+            HubState.FlyEnabled = val
+            toggleFly(val)
+        end)
+        addNativeSlider(playerTab, "Fly Speed", 20, 250, HubState.FlySpeed, function(val)
+            HubState.FlySpeed = val
+        end)
+        addNativeToggle(playerTab, "Noclip", HubState.NoclipEnabled, function(val)
+            HubState.NoclipEnabled = val
+        end)
+        addNativeToggle(playerTab, "Infinite Jump", HubState.InfiniteJump, function(val)
+            HubState.InfiniteJump = val
+        end)
+    end
+
+    -- Common: Console Tab
+    local consoleTab = tabFrames["Console"]
+    if consoleTab then
+        addNativeSection(consoleTab, "Real-Time Activity Log")
+        local consoleBox = Instance.new("TextBox")
+        consoleBox.Size = UDim2.new(0.96, 0, 0, 320)
+        consoleBox.BackgroundColor3 = Color3.fromRGB(12, 13, 19)
+        consoleBox.TextColor3 = Color3.fromRGB(165, 243, 180)
+        consoleBox.Font = Enum.Font.Code
+        consoleBox.TextSize = 11
+        consoleBox.ClearTextOnFocus = false
+        consoleBox.TextEditable = false
+        consoleBox.TextXAlignment = Enum.TextXAlignment.Left
+        consoleBox.TextYAlignment = Enum.TextYAlignment.Top
+        consoleBox.MultiLine = true
+        consoleBox.Text = table.concat(LogEntries, "\n")
+        consoleBox.Parent = consoleTab
+        local cbCorner = Instance.new("UICorner") cbCorner.CornerRadius = UDim.new(0, 8) cbCorner.Parent = consoleBox
+        local cbStroke = Instance.new("UIStroke") cbStroke.Color = Color3.fromRGB(36, 40, 58) cbStroke.Thickness = 1 cbStroke.Parent = consoleBox
+
+        local consoleRefreshThread = task.spawn(function()
+            while IsHubLoaded do
+                task.wait(1)
+                pcall(function()
+                    if consoleBox and consoleBox.Parent then
+                        consoleBox.Text = table.concat(LogEntries, "\n")
+                    end
+                end)
+            end
+        end)
+        table.insert(HubThreads, consoleRefreshThread)
+    end
+
+    -- Common: Settings Tab
+    local setTab = tabFrames["Settings"]
+    if setTab then
+        addNativeSection(setTab, "Game & Script Update Watcher")
+
+        local gameWatcherCard = addNativeParagraph(setTab, "Live Game Watcher",
+            string.format("Place: %s | PlaceId: %s\nGame Version: v%s | Servidor Ativo",
+                tostring(GAME_MODE_NAME), tostring(game.PlaceId), tostring(game.PlaceVersion)))
+
+        local scriptVerCard = addNativeParagraph(setTab, "Script Version Status",
+            string.format("Versao Instalada: v%s PRO\nStatus GitHub: %s", SCRIPT_VERSION, ScriptUpdateNotice))
+
+        addNativeButton(setTab, "Verificar Atualizacoes no GitHub", function()
+            scriptVerCard.Text = "Conectando ao GitHub para verificar versao..."
+            checkForScriptUpdates(function(notice, available)
+                if scriptVerCard and scriptVerCard.Parent then
+                    scriptVerCard.Text = string.format("Versao Instalada: v%s PRO\nStatus GitHub: %s", SCRIPT_VERSION, notice)
                 end
             end)
-        end
-    end)
+        end)
 
-    addNativeSection(farmTab, "Manual Tool Overrides")
-    addNativeButton(farmTab, "Auto-Select Best Available Tool", function()
-        HubState.ForcedToolSlot = 0
-        local bestSlot = getBestAvailableToolSlot()
-        equipToolSlot(bestSlot)
-        addLog("info", "Reset tool selection to Auto: Equipped Slot " .. bestSlot)
-    end)
-    addNativeButton(farmTab, "Throw TNT Now (Instant Blast)", function()
-        local hrp = getHRP()
-        if hrp then
-            local target = nil
-            local rgbStrands = getAllRainbowStrands()
-            if #rgbStrands > 0 then
-                target = rgbStrands[1].Position
-            else
-                target = Landmarks.HayCenter or (hrp.Position + hrp.CFrame.LookVector * 18)
-            end
-            throwTntAt(target)
-        end
-    end, true)
-    addNativeButton(farmTab, "Equip Vacuum (Slot 5)", function()
-        HubState.ForcedToolSlot = SLOT_VACUUM
-        equipToolSlot(SLOT_VACUUM)
-    end)
-    addNativeButton(farmTab, "Equip Pitchfork (Slot 3)", function()
-        HubState.ForcedToolSlot = SLOT_PITCHFORK
-        equipToolSlot(SLOT_PITCHFORK)
-    end)
-    addNativeButton(farmTab, "Equip TNT (Slot 2)", function()
-        HubState.ForcedToolSlot = SLOT_TNT
-        equipToolSlot(SLOT_TNT)
-    end)
-    addNativeButton(farmTab, "Equip Hand (Slot 1)", function()
-        HubState.ForcedToolSlot = SLOT_HAND
-        equipToolSlot(SLOT_HAND)
-    end)
-    addNativeButton(farmTab, "Deploy Drone Now (Slot 4)", function()
-        if Remotes.DeployDrone then
-            pcall(function() Remotes.DeployDrone:FireServer() end)
-            addLog("info", "Fired DeployDrone command")
-        end
-    end)
+        addNativeButton(setTab, "Atualizar / Recarregar Script (Auto-Download)", function()
+            addLog("info", "Recarregando script diretamente do GitHub...")
+            unloadHub()
+            loadstring(game:HttpGet("https://raw.githubusercontent.com/victorcxzk/search-for-the-needle-script/master/main.lua"))()
+        end, true)
 
-    addNativeSection(farmTab, "Quick Actions")
-    addNativeButton(farmTab, "Sell Hay Now (Instant Teleport)", function()
-        teleportTo(Landmarks.SellCow)
-        task.wait(0.2)
-        if Remotes.SellHay then Remotes.SellHay:FireServer() end
-        addLog("info", "Executed instant sell.")
-    end, true)
+        addNativeSection(setTab, "Modo de Exibicao da Interface")
+        addNativeButton(setTab, "Alternar Contexto (Atualmente: " .. (isLobbyMode and "LOBBY" or "MATCH") .. ")", function()
+            CurrentContextMode = (CurrentContextMode == "Lobby") and "Match" or "Lobby"
+            addLog("info", "Contexto alternado manualmente para: " .. CurrentContextMode)
+            buildNativeUI()
+        end)
 
-    -- Tab 2: Player
-    addNativeSection(playerTab, "Camera & Mouse Freedom")
-    addNativeToggle(playerTab, "Unlock Camera (3rd Person)", HubState.UnlockCamera, function(val)
-        HubState.UnlockCamera = val
-        applyCameraAndMouse()
-    end)
-    addNativeToggle(playerTab, "Free Mouse (Hold RMB to Look)", HubState.FreeMouse, function(val)
-        HubState.FreeMouse = val
-        applyCameraAndMouse()
-    end)
-    addNativeButton(playerTab, "Snap 3rd Person Camera (Zoom Out)", function()
-        forceSnap3rdPerson(22)
-    end)
-    addNativeSlider(playerTab, "Camera Zoom Distance", 5, 80, HubState.CameraZoomDistance, function(val)
-        HubState.CameraZoomDistance = val
-        forceSnap3rdPerson(val)
-    end)
+        addNativeSection(setTab, "Hub Information")
+        addNativeParagraph(setTab, "Needle Hub v5.3 Ultimate", "Modern Cyber Glass Architecture | Fully Autonomous AI Automation Engine.")
 
-    addNativeSection(playerTab, "Movement & Speed")
-    addNativeToggle(playerTab, "Custom WalkSpeed", HubState.WalkSpeedEnabled, function(val)
-        HubState.WalkSpeedEnabled = val
-        if not val then
-            local hum = getHumanoid()
-            if hum then hum.WalkSpeed = 16 end
-        end
-    end)
-    addNativeSlider(playerTab, "WalkSpeed Value", 16, 250, math.floor(HubState.WalkSpeed), function(val)
-        HubState.WalkSpeed = val
-    end)
-    addNativeToggle(playerTab, "Custom JumpHeight", HubState.JumpHeightEnabled, function(val)
-        HubState.JumpHeightEnabled = val
-        if not val then
-            local hum = getHumanoid()
-            if hum then hum.JumpHeight = 7.2 end
-        end
-    end)
-    addNativeSlider(playerTab, "JumpHeight Value", 7, 100, math.floor(HubState.JumpHeight), function(val)
-        HubState.JumpHeight = val
-    end)
-
-    addNativeSection(playerTab, "Physics & Flight")
-    addNativeToggle(playerTab, "Fly (WASD + Space/Shift)", HubState.FlyEnabled, function(val)
-        HubState.FlyEnabled = val
-        toggleFly(val)
-    end)
-    addNativeSlider(playerTab, "Fly Speed", 20, 250, HubState.FlySpeed, function(val)
-        HubState.FlySpeed = val
-    end)
-    addNativeToggle(playerTab, "Noclip", HubState.NoclipEnabled, function(val)
-        HubState.NoclipEnabled = val
-    end)
-    addNativeToggle(playerTab, "Infinite Jump", HubState.InfiniteJump, function(val)
-        HubState.InfiniteJump = val
-    end)
-
-    -- Tab 3: Teleport
-    addNativeSection(teleTab, "Map Landmarks")
-    addNativeButton(teleTab, "Teleport to Hay Mound", function()
-        teleportTo(Landmarks.HayCenter)
-        addLog("info", "Teleported to Hay Mound")
-    end)
-    addNativeButton(teleTab, "Teleport to Sell Cow", function()
-        teleportTo(Landmarks.SellCow)
-        addLog("info", "Teleported to Sell Cow")
-    end)
-    addNativeButton(teleTab, "Teleport to Farmer NPC", function()
-        teleportTo(Landmarks.FarmerNPC)
-        addLog("info", "Teleported to Farmer NPC")
-    end)
-    addNativeButton(teleTab, "Teleport to Needle (If Found)", function()
-        if Landmarks.NeedleCFrame then
-            teleportTo(Landmarks.NeedleCFrame)
-            addLog("info", "Teleported to Needle CFrame")
-        else
-            addLog("warn", "Needle location is not yet known.")
-        end
-    end)
-
-    -- Tab 4: Visuals ESP
-    addNativeSection(espTab, "Visual ESP Trackers")
-    addNativeToggle(espTab, "Needle ESP (Bright Yellow)", HubState.NeedleESP, function(val) HubState.NeedleESP = val end)
-    addNativeToggle(espTab, "Rainbow / RGB Straw ESP (Magenta)", HubState.RgbESP, function(val) HubState.RgbESP = val end)
-    addNativeToggle(espTab, "Gems ESP (Emerald Green)", HubState.GemESP, function(val) HubState.GemESP = val end)
-    addNativeToggle(espTab, "Sell Cow ESP (Electric Blue)", HubState.SellESP, function(val) HubState.SellESP = val end)
-    addNativeToggle(espTab, "Player ESP (White)", HubState.PlayerESP, function(val) HubState.PlayerESP = val end)
-
-    -- Tab 5: Lobby
-    addNativeSection(lobbyTab, "Lobby Automation")
-    addNativeButton(lobbyTab, "Redeem All Known Codes", function()
-        redeemAllCodes("")
-    end)
-    addNativeButton(lobbyTab, "Equip Cow Pet (Lobby)", function()
-        if Remotes.EquipPet then
-            Remotes.EquipPet:InvokeServer("Cow")
-            addLog("info", "Equipped Cow Pet")
-        end
-    end)
-    addNativeButton(lobbyTab, "Open All Chests (Batch)", function()
-        if Remotes.OpenChest then
-            for i = 1, 10 do
-                pcall(function() Remotes.OpenChest:InvokeServer() end)
-                task.wait(0.2)
-            end
-            addLog("info", "Batch opened chests.")
-        end
-    end)
-
-    -- Tab 6: Console
-    addNativeSection(consoleTab, "Real-Time Activity Log")
-    local consoleBox = Instance.new("TextBox")
-    consoleBox.Size = UDim2.new(0.96, 0, 0, 320)
-    consoleBox.BackgroundColor3 = Color3.fromRGB(12, 13, 19)
-    consoleBox.TextColor3 = Color3.fromRGB(165, 243, 180)
-    consoleBox.Font = Enum.Font.Code
-    consoleBox.TextSize = 11
-    consoleBox.ClearTextOnFocus = false
-    consoleBox.TextEditable = false
-    consoleBox.TextXAlignment = Enum.TextXAlignment.Left
-    consoleBox.TextYAlignment = Enum.TextYAlignment.Top
-    consoleBox.MultiLine = true
-    consoleBox.Text = table.concat(LogEntries, "\n")
-    consoleBox.Parent = consoleTab
-    local cbCorner = Instance.new("UICorner") cbCorner.CornerRadius = UDim.new(0, 8) cbCorner.Parent = consoleBox
-    local cbStroke = Instance.new("UIStroke") cbStroke.Color = Color3.fromRGB(36, 40, 58) cbStroke.Thickness = 1 cbStroke.Parent = consoleBox
-
-    local consoleRefreshThread = task.spawn(function()
-        while IsHubLoaded do
-            task.wait(1)
-            pcall(function()
-                consoleBox.Text = table.concat(LogEntries, "\n")
-            end)
-        end
-    end)
-    table.insert(HubThreads, consoleRefreshThread)
-
-    -- Tab 7: Settings
-    addNativeSection(setTab, "Hub Information")
-    addNativeParagraph(setTab, "Needle Hub v5.1 Ultimate", "Modern Cyber Glass Architecture | Fully Autonomous AI Automation Engine.")
-
-    addNativeSection(setTab, "Session Management")
-    addNativeButton(setTab, "UNLOAD / DESTROY SCRIPT", function()
-        unloadHub()
-    end, true)
-
-    -- Select Default Tab
-    selectTab("Auto Farm")
+        addNativeSection(setTab, "Session Management")
+        addNativeButton(setTab, "UNLOAD / DESTROY SCRIPT", function()
+            unloadHub()
+        end, true)
+    end
 
     -- Setup Floating Button to toggle main frame visibility
     createFloatingToggleButton(function()
         mainFrame.Visible = not mainFrame.Visible
     end)
 end
+
+-- Background Watcher: Game PlaceVersion Update Detection
+pcall(function()
+    local initialPlaceVersion = game.PlaceVersion
+    game:GetPropertyChangedSignal("PlaceVersion"):Connect(function()
+        local newVer = game.PlaceVersion
+        addLog("warn", string.format("AVISO: O jogo Search For The Needle acabou de atualizar! (v%s -> v%s)", tostring(initialPlaceVersion), tostring(newVer)))
+        pcall(function()
+            local StarterGui = safeService("StarterGui")
+            if StarterGui then
+                StarterGui:SetCore("SendNotification", {
+                    Title = "Needle Hub - Jogo Atualizado!",
+                    Text = "O jogo foi atualizado para v" .. tostring(newVer) .. "! Verifique se o script precisa de atualizacao.",
+                    Duration = 10
+                })
+            end
+        end)
+    end)
+end)
+
+-- Background Watcher: Place Transition (Lobby <-> Match)
+task.spawn(function()
+    while IsHubLoaded do
+        task.wait(2.5)
+        local detectedGameplay = (game.PlaceId == FARMHOUSE_PLACE_ID or game.PlaceId == BASEMENT_PLACE_ID)
+        local detectedLobby = (game.PlaceId == LOBBY_PLACE_ID)
+        local expected = detectedLobby and "Lobby" or (detectedGameplay and "Match" or CurrentContextMode)
+        if expected ~= CurrentContextMode then
+            CurrentContextMode = expected
+            addLog("info", "Mudanca de local detectada! Alternando interface para modo: " .. CurrentContextMode)
+            pcall(buildNativeUI)
+        end
+    end
+end)
+
+-- Check GitHub script updates on load
+checkForScriptUpdates()
 
 -- Initialize UI & Apply Camera Snap
 local okUi, errUi = pcall(buildNativeUI)
@@ -2628,4 +2993,4 @@ if not okUi then
     addLog("error", "UI Construct Error: " .. tostring(errUi))
 end
 forceSnap3rdPerson(22)
-addLog("info", "Needle Hub v5.1 loaded successfully! Press LeftAlt to toggle mouse, hold RMB to rotate camera.")
+addLog("info", "Needle Hub v5.3 loaded successfully! Press LeftAlt to toggle mouse, hold RMB to rotate camera.")

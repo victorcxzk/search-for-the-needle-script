@@ -1,0 +1,7 @@
+{
+  "version": "5.3",
+  "versionNumber": 53,
+  "gameCompatibility": "All Places (Lobby, Farmhouse, Basement)",
+  "releaseDate": "2026-09-13",
+  "releaseNotes": "Lobby/Game adaptive mode, sidebar layout fix, game PlaceVersion watcher, and Auto-TNT cleaver."
+}
