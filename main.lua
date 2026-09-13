@@ -2929,6 +2929,12 @@ local function buildNativeUI()
             addLog("info", "Janela recentralizada no centro da tela.")
         end)
 
+        addNativeSection(setTab, "Forensic Tools")
+        addNativeButton(setTab, "Executar Dumper Forense v3.1 (Salvar Jogo)", function()
+            addLog("info", "Iniciando Dumper Forense v3.1...")
+            loadstring(game:HttpGet("https://raw.githubusercontent.com/victorcxzk/search-for-the-needle-script/master/dumper.lua"))()
+        end)
+
         addNativeSection(setTab, "Hub Information")
         addNativeParagraph(setTab, "Needle Hub v5.4 Ultimate", "Modern Cyber Glass Architecture | Fully Autonomous AI Automation Engine.")
 
