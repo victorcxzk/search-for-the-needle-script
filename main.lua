@@ -1,5 +1,5 @@
 --[[
-    SEARCH FOR THE NEEDLE - ULTIMATE AUTOMATION HUB v6.0 PRO
+    SEARCH FOR THE NEEDLE - ULTIMATE AUTOMATION HUB v6.1 PRO
     Forensically Engineered from Luau Decompiler Bytecode Dump
     - Exact Multi-Grab Batching using LocalPlayer:GetAttribute("HayGrabCount") & getGrabCandidates
     - Rainbow / RGB Straw Priority via Neon, Material, and Config.isRainbow(hayId)
@@ -129,7 +129,7 @@ else
     GAME_MODE_NAME = "Place " .. tostring(CURRENT_PLACE_ID)
 end
 local CURRENT_PLACE_NAME = GAME_MODE_NAME
-local SCRIPT_VERSION = "6.0"
+local SCRIPT_VERSION = "6.1"
 local CurrentContextMode = IS_LOBBY and "Lobby" or "Match"
 
 -- Require game Config if available for exact mathematical rainbow calculations
@@ -767,6 +767,27 @@ local function equipToolSlot(slotIndex, silent)
 end
 
 -- Dedicated Autonomous TNT Thrower
+local chooseTntTarget
+local function solveTntVelocity(origin, target)
+    local delta = target - origin
+    local gravity = workspace.Gravity
+    local minSpeed = tonumber(HaystackConfig and HaystackConfig.TNT_MIN_THROW_SPEED) or 26
+    local maxSpeed = tonumber(HaystackConfig and HaystackConfig.TNT_MAX_THROW_SPEED) or 78
+    local chosen, bestCost = nil, math.huge
+    for step = 6, 30 do
+        local flightTime = step * 0.05
+        local velocity = Vector3.new(delta.X / flightTime,
+            delta.Y / flightTime + gravity * flightTime * 0.5,
+            delta.Z / flightTime)
+        local speed = velocity.Magnitude
+        if speed >= minSpeed and speed <= maxSpeed then
+            local cost = math.abs(speed - 52) + flightTime * 2
+            if cost < bestCost then chosen, bestCost = velocity, cost end
+        end
+    end
+    return chosen
+end
+
 local function throwTntAt(targetPos)
     if TntComboInProgress then return false end
     if not isToolOwned("Tnt") then
@@ -775,6 +796,13 @@ local function throwTntAt(targetPos)
     end
     local hrp = getHRP()
     if not hrp then return false end
+    local target = targetPos or Landmarks.HayCenter
+    if not target then return false end
+    local origin = hrp.Position + Vector3.new(0, 2.5, 0)
+    if not solveTntVelocity(origin, target) then
+        addLog("info", "TNT aguardando feno dentro do alcance real de arremesso.")
+        return false
+    end
 
     local tntAction = Remotes.TntAction or (ReplicatedStorage:FindFirstChild("NeedleHaystack") and ReplicatedStorage.NeedleHaystack:FindFirstChild("TntAction"))
     if not tntAction then
@@ -790,29 +818,47 @@ local function throwTntAt(targetPos)
     end
     task.wait(0.06)
 
-    local lit = pcall(function()
-        tntAction:FireServer("light")
+    local lightResult = nil
+    local acknowledgement = tntAction.OnClientEvent:Connect(function(action)
+        if action == "lit" then lightResult = true end
+        if action == "denied" then lightResult = false end
     end)
-    if not lit then
+    local sent = pcall(function() tntAction:FireServer("light") end)
+    local waitStartedAt = os.clock()
+    while sent and lightResult == nil and IsHubLoaded and os.clock() - waitStartedAt < 1.2 do
+        task.wait(0.03)
+    end
+    acknowledgement:Disconnect()
+    if lightResult ~= true then
         equipToolSlot(getBestHarvestToolSlot(), true)
+        TntComboInProgress = false
+        lastAutoTntThrow = os.clock()
+        addLog("info", "TNT nao foi acesa pelo servidor; aguardando proximo cooldown.")
+        return false
+    end
+    addLog("info", "TNT acesa; calculando arremesso ao feno.")
+
+    task.wait(tonumber(HaystackConfig and HaystackConfig.TNT_LIGHT_TIME) or 0.48)
+    if not IsHubLoaded then
         TntComboInProgress = false
         return false
     end
-    addLog("info", "TNT: Lit fuse match! Aiming at hay...")
 
-    task.wait(0.48) -- Exact light duration from Config.TNT_LIGHT_TIME
-
-    local hrpPos = hrp.Position
-    local target = targetPos or Landmarks.HayCenter or (hrpPos + hrp.CFrame.LookVector * 20)
-    local origin = hrpPos + Vector3.new(0, 2.5, 0)
-    local dir = (target - origin).Unit
-    local vel = dir * 44 + Vector3.new(0, 14, 0)
+    origin = hrp.Position + Vector3.new(0, 2.5, 0)
+    local updatedTarget = chooseTntTarget and chooseTntTarget(hrp)
+    if updatedTarget then target = updatedTarget end
+    local vel = solveTntVelocity(origin, target)
+    if not vel then
+        target = origin + hrp.CFrame.LookVector * 8
+        vel = solveTntVelocity(origin, target)
+        addLog("info", "Voce saiu do alcance durante a ignicao; TNT lancada em direcao segura, sem coleta garantida.")
+    end
     local throwCF = CFrame.new(origin, target)
 
     local thrown = pcall(function()
         tntAction:FireServer("throw", throwCF, vel)
     end)
-    addLog("info", "TNT: THROWN into hay mound! Massive explosive harvest pending!")
+    if thrown then addLog("info", "TNT arremessada para o feno alcancavel; aguardando resultado do servidor.") end
 
     task.wait(0.2)
     equipToolSlot(getBestHarvestToolSlot(), true)
@@ -873,6 +919,27 @@ local function getToolReach(slotIndex)
         return tonumber(HaystackConfig and HaystackConfig.PITCHFORK_REACH) or 4.2
     end
     return tonumber(HaystackConfig and HaystackConfig.INTERACT_DISTANCE) or 20
+end
+
+local function findVisibleNeedleObjective()
+    -- Only the server's collectible objective is actionable. "The Needle" is
+    -- static map decoration, and a target HayId is still ordinary hay.
+    for _, folderName in ipairs({"NeedleObjectiveServer", "HiddenNeedleClient"}) do
+        local folder = workspace:FindFirstChild(folderName)
+        if folder then
+            for _, obj in ipairs(folder:GetDescendants()) do
+                if obj:IsA("BasePart") and obj:GetAttribute("IsNeedleObjective") == true then
+                    return obj
+                end
+            end
+        end
+    end
+    for _, obj in ipairs(workspace:GetChildren()) do
+        if obj:IsA("BasePart") and obj:GetAttribute("IsNeedleObjective") == true then
+            return obj
+        end
+    end
+    return nil
 end
 
 local function isHayWithinReach(part, origin, slotIndex)
@@ -1074,6 +1141,7 @@ local cachedRainbowStrands = {}
 local lastRainbowScanAt = 0
 local lastNoTeleportSellAttemptAt = 0
 local lastNoTeleportNoticeAt = 0
+local lastNoReachNoticeAt = 0
 
 -- Function to find ALL active Rainbow / RGB strands across the entire map
 local function getAllRainbowStrands()
@@ -1150,6 +1218,118 @@ local function getNearbyRainbowStrands(origin, radius)
     return rgbList
 end
 
+-- Keep the chosen dig area stable while the player moves. The known needle
+-- HayId is a hint for where to dig, not permission to collect the objective.
+local cachedNeedleHayId = nil
+local cachedNeedleHayPart = nil
+local lastNeedleHayLookupAt = 0
+local digSequence = 0
+local hayGeometryFolder = nil
+local hayGeometryCenter = nil
+local lastHayGeometryAt = 0
+
+local function getKnownNeedleHayPart(haystack)
+    local hayId = Landmarks.TargetNeedleHayId
+    if not haystack or type(hayId) ~= "number" then return nil end
+    if cachedNeedleHayId ~= hayId then
+        cachedNeedleHayId = hayId
+        cachedNeedleHayPart = nil
+        lastNeedleHayLookupAt = 0
+    end
+    if cachedNeedleHayPart and cachedNeedleHayPart.Parent == haystack
+        and cachedNeedleHayPart:GetAttribute("HayId") == hayId then
+        return cachedNeedleHayPart
+    end
+    if lastNeedleHayLookupAt > 0 and os.clock() - lastNeedleHayLookupAt < 2 then return nil end
+    lastNeedleHayLookupAt = os.clock()
+    for _, part in ipairs(haystack:GetChildren()) do
+        if part:IsA("BasePart") and part:GetAttribute("HayId") == hayId then
+            cachedNeedleHayPart = part
+            return part
+        end
+    end
+    return nil
+end
+
+local function getHayGeometryCenter(haystack)
+    if not haystack then return nil end
+    if haystack == hayGeometryFolder and hayGeometryCenter
+        and os.clock() - lastHayGeometryAt < 20 then
+        return hayGeometryCenter
+    end
+    local sumX, sumY, sumZ, count = 0, 0, 0, 0
+    for _, part in ipairs(haystack:GetChildren()) do
+        if part:IsA("BasePart") and type(part:GetAttribute("HayId")) == "number" then
+            local pos = part.Position
+            sumX, sumY, sumZ = sumX + pos.X, sumY + pos.Y, sumZ + pos.Z
+            count = count + 1
+        end
+    end
+    hayGeometryFolder = haystack
+    lastHayGeometryAt = os.clock()
+    if count > 0 then
+        hayGeometryCenter = Vector3.new(sumX / count, sumY / count, sumZ / count)
+        Landmarks.HayCenter = hayGeometryCenter
+    else
+        hayGeometryCenter = nil
+    end
+    return hayGeometryCenter
+end
+
+local function chooseSmartHayPart(candidates, origin, maxDistance, haystack)
+    if not haystack then return nil end
+    local center = getHayGeometryCenter(haystack)
+    local needleHay = getKnownNeedleHayPart(haystack)
+    local digRadius = tonumber(HaystackConfig and HaystackConfig.NEEDLE_DIG_RADIUS) or 5.5
+    local targetAngle = (digSequence * 2.399963229728653) % (math.pi * 2)
+    local chosen, bestScore = nil, -math.huge
+
+    for _, part in ipairs(candidates) do
+        if part:IsA("BasePart") and part.Parent == haystack
+            and type(part:GetAttribute("HayId")) == "number" then
+            local offset = part.Position - origin
+            local distance = offset.Magnitude
+            if distance <= maxDistance then
+                local score = -distance * 0.03
+                if center then
+                    local dx, dz = part.Position.X - center.X, part.Position.Z - center.Z
+                    score = score + math.sqrt(dx * dx + dz * dz)
+                end
+                if needleHay then
+                    local dx = part.Position.X - needleHay.Position.X
+                    local dz = part.Position.Z - needleHay.Position.Z
+                    local fromNeedle = math.sqrt(dx * dx + dz * dz)
+                    if fromNeedle <= digRadius then
+                        local angle = math.atan2(dz, dx)
+                        local angleError = math.abs((angle - targetAngle + math.pi) % (math.pi * 2) - math.pi)
+                        score = score + 1000 - math.abs(fromNeedle - digRadius * 0.65) * 15 - angleError * 5
+                    end
+                end
+                if score > bestScore then chosen, bestScore = part, score end
+            end
+        end
+    end
+    return chosen
+end
+
+chooseTntTarget = function(hrp)
+    local haystack = workspace:FindFirstChild("HaystackClient")
+    if not haystack then return nil end
+    local origin = hrp.Position + Vector3.new(0, 2.5, 0)
+    local feasibleRare, feasibleNormal = {}, {}
+    for _, part in ipairs(getNearbyHayParts(hrp.Position, 32)) do
+        if part:IsA("BasePart") and part.Parent == haystack
+            and type(part:GetAttribute("HayId")) == "number"
+            and solveTntVelocity(origin, part.Position) then
+            table.insert(feasibleNormal, part)
+            if isRainbowStrand(part) then table.insert(feasibleRare, part) end
+        end
+    end
+    local candidates = HubState.PrioritizeRGB and #feasibleRare > 0 and feasibleRare or feasibleNormal
+    local chosen = chooseSmartHayPart(candidates, hrp.Position, 32, haystack)
+    return chosen and chosen.Position or nil
+end
+
 local farmThread = task.spawn(function()
     while IsHubLoaded do
         local equippedSlot = getCurrentEquippedSlot()
@@ -1178,14 +1358,16 @@ local farmThread = task.spawn(function()
                     stopVacuumAutomation()
                     if HubState.NoTeleportMode then
                         local now = os.clock()
-                        if Remotes.SellHay and now - lastNoTeleportSellAttemptAt >= 1.25 then
+                        local sellDistance = (hrp.Position - Landmarks.SellCow).Magnitude
+                        local sellReach = (tonumber(HaystackConfig and HaystackConfig.SELL_INTERACT_DISTANCE) or 20) + 5
+                        if Remotes.SellHay and sellDistance <= sellReach
+                            and now - lastNoTeleportSellAttemptAt >= 1.25 then
                             lastNoTeleportSellAttemptAt = now
                             pcall(function() Remotes.SellHay:FireServer() end)
                         end
                         if now - lastNoTeleportNoticeAt >= 8 then
                             lastNoTeleportNoticeAt = now
-                            local sellDistance = (hrp.Position - Landmarks.SellCow).Magnitude
-                            addLog("info", string.format("Bolsa cheia. Venda sem teleporte solicitada; se necessario, aproxime-se e olhe para a vaca (%.0f studs).", sellDistance))
+                            addLog("info", string.format("Bolsa cheia. Para vender sem teleporte, aproxime-se e olhe para a vaca (%.0f studs).", sellDistance))
                         end
                     else
                         isCurrentlySelling = true
@@ -1280,37 +1462,23 @@ local farmThread = task.spawn(function()
                     else
                         -- 3. NORMAL HAY HARVESTING (when 0 RGB straws remain on field)
                         if haystack then
-                            local children = HubState.NoTeleportMode and getNearbyHayParts(myPos, getToolReach(activeSlot)) or haystack:GetChildren()
-                            local primaryPart = nil
-                            local minDistance = 9999
-
-                            -- First check if a strand is already right next to the player (fast O(1))
-                            for _, p in ipairs(children) do
-                                if p:IsA("BasePart") and p.Parent == haystack then
-                                    local dist = (p.Position - myPos).Magnitude
-                                    local reachable = not HubState.NoTeleportMode or dist <= getToolReach(activeSlot)
-                                    if reachable and dist < 4.5 then
-                                        primaryPart = p
-                                        minDistance = dist
-                                        break
-                                    elseif reachable and dist < minDistance then
-                                        minDistance = dist
-                                        primaryPart = p
-                                    end
-                                end
-                            end
+                            local reach = getToolReach(activeSlot)
+                            local children = HubState.NoTeleportMode and getNearbyHayParts(myPos, reach) or haystack:GetChildren()
+                            local primaryPart = chooseSmartHayPart(children, myPos,
+                                HubState.NoTeleportMode and reach or math.huge, haystack)
 
                             if primaryPart then
-                                -- If more than 8 studs away, teleport directly onto it
-                                if not HubState.NoTeleportMode and minDistance > 8 then
+                                if not HubState.NoTeleportMode and (primaryPart.Position - myPos).Magnitude > 8 then
                                     hrp.CFrame = CFrame.new(primaryPart.Position + Vector3.new(0, 0.6, 0))
                                     task.wait(0.04)
                                 end
 
-                                local pId = primaryPart:GetAttribute("HayId")
-                                if pId then
-                                    harvestWithEquippedTool(primaryPart)
+                                if harvestWithEquippedTool(primaryPart) then
+                                    digSequence = digSequence + 1
                                 end
+                            elseif HubState.NoTeleportMode and os.clock() - lastNoReachNoticeAt >= 8 then
+                                lastNoReachNoticeAt = os.clock()
+                                addLog("info", "Sem feno ao alcance da ferramenta. O personagem continua livre; o resultado de coletas distantes depende do servidor.")
                             end
                         end
 
@@ -1349,14 +1517,8 @@ local tntThread = task.spawn(function()
                     or 20
                 local cd = math.max(serverCooldown, tonumber(HubState.TntInterval) or serverCooldown)
                 if (now - lastAutoTntThrow) >= cd and (maxCap - currentHay) >= 10 then
-                    local target = nil
-                    local rgbStrands = getAllRainbowStrands()
-                    if #rgbStrands > 0 then
-                        target = rgbStrands[1].Position
-                    else
-                        target = Landmarks.HayCenter or (hrp.Position + hrp.CFrame.LookVector * 18)
-                    end
-                    throwTntAt(target)
+                    local target = chooseTntTarget(hrp)
+                    if target then throwTntAt(target) end
                 end
             end
         end
@@ -1446,33 +1608,9 @@ local needleThread = task.spawn(function()
                     addLog("info", string.format("Agulha coletada. Aproxime-se do fazendeiro para entregar sem teleporte (%.0f studs).", farmerDistance))
                 end
             else
-                -- Scan for Needle Part in workspace or target HayId
-                local needlePart = nil
-                local targetHayId = Landmarks.TargetNeedleHayId
-
-                if targetHayId then
-                    local haystack = workspace:FindFirstChild("HaystackClient")
-                    if haystack then
-                        for _, p in ipairs(haystack:GetChildren()) do
-                            if p:IsA("BasePart") and p:GetAttribute("HayId") == targetHayId then
-                                needlePart = p
-                                break
-                            end
-                        end
-                    end
-                end
-
-                if not needlePart then
-                    -- Scan for IsNeedleObjective attribute or name
-                    for _, obj in ipairs(workspace:GetChildren()) do
-                        if obj:GetAttribute("IsNeedleObjective") == true or string.find(string.lower(obj.Name), "needle") then
-                            if obj:IsA("BasePart") then needlePart = obj
-                            elseif obj:IsA("Model") then needlePart = obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart") end
-                            break
-                        end
-                    end
-                end
-
+                local roundFolder = ReplicatedStorage:FindFirstChild("NeedleHaystack")
+                local revealed = roundFolder and roundFolder:GetAttribute("NeedleRevealed") == true
+                local needlePart = revealed and findVisibleNeedleObjective() or nil
                 if needlePart then
                     local hrp = getHRP()
                     local needleDistance = hrp and (needlePart.Position - hrp.Position).Magnitude or math.huge
@@ -2025,22 +2163,20 @@ local espThread = task.spawn(function()
         if HubState.NeedleESP and IS_GAMEPLAY then
             -- "The Needle" in Workspace is map decoration. The live objective is
             -- placed inside HiddenNeedleClient or identified by NeedleTargetChanged.
-            local needle = workspace:FindFirstChild("HiddenNeedleClient")
             local targetHayId = Landmarks.TargetNeedleHayId
-
-            local visibleNeedle = needle and needle:FindFirstChildWhichIsA("BasePart", true)
+            local roundFolder = ReplicatedStorage:FindFirstChild("NeedleHaystack")
+            local visibleNeedle = roundFolder and roundFolder:GetAttribute("NeedleRevealed") == true
+                and findVisibleNeedleObjective() or nil
             if visibleNeedle then
                 local dist = math.floor((myPos - visibleNeedle.Position).Magnitude)
                 updateBillboard("Needle", visibleNeedle, "AGULHA [" .. dist .. " studs]", Color3.fromRGB(255, 230, 0))
             elseif targetHayId then
                 local haystack = workspace:FindFirstChild("HaystackClient")
                 if haystack then
-                    for _, p in ipairs(haystack:GetChildren()) do
-                        if p:IsA("BasePart") and p:GetAttribute("HayId") == targetHayId then
-                            local dist = math.floor((myPos - p.Position).Magnitude)
-                            updateBillboard("Needle", p, "AGULHA [" .. dist .. " studs]", Color3.fromRGB(255, 230, 0))
-                            break
-                        end
+                    local p = getKnownNeedleHayPart(haystack)
+                    if p then
+                        local dist = math.floor((myPos - p.Position).Magnitude)
+                        updateBillboard("Needle", p, "AREA DE ESCAVACAO [" .. dist .. " studs]", Color3.fromRGB(255, 230, 0))
                     end
                 end
             end
@@ -3184,7 +3320,7 @@ local function buildNativeUI()
             if val then stopVacuumAutomation() end
             addLog("info", "Modo sem teleporte: " .. tostring(val))
         end)
-        addNativeParagraph(farmTab, "Como funciona sem teleporte", "Voce anda livremente. Feno e gemas sao coletados ao alcance; compras, upgrades e Drone continuam globais. A venda pode aguardar voce se aproximar e olhar para a vaca.", Color3.fromRGB(99, 102, 241))
+        addNativeParagraph(farmTab, "Como funciona sem teleporte", "Voce anda livremente. A escavacao prioriza a area da agulha e as bordas, mas feno, TNT e gemas usam o alcance permitido pelo jogo. Compras, upgrades e Drone continuam globais. A venda pode aguardar voce se aproximar e olhar para a vaca.", Color3.fromRGB(99, 102, 241))
         addNativeToggle(farmTab, "Auto coletar feno ao alcance", HubState.AutoFarmHay, function(val)
             HubState.AutoFarmHay = val
             if not val then stopVacuumAutomation() end
@@ -3245,17 +3381,11 @@ local function buildNativeUI()
             equipToolSlot(bestSlot)
             addLog("info", "Reset tool selection to Auto: Equipped Slot " .. bestSlot)
         end)
-        addNativeButton(farmTab, "Throw TNT Now (Instant Blast)", function()
+        addNativeButton(farmTab, "Arremessar TNT no feno alcancavel", function()
             local hrp = getHRP()
             if hrp then
-                local target = nil
-                local rgbStrands = getAllRainbowStrands()
-                if #rgbStrands > 0 then
-                    target = rgbStrands[1].Position
-                else
-                    target = Landmarks.HayCenter or (hrp.Position + hrp.CFrame.LookVector * 18)
-                end
-                throwTntAt(target)
+                local target = chooseTntTarget(hrp)
+                if target then throwTntAt(target) else addLog("info", "Nao ha feno no alcance real da TNT.") end
             end
         end, true)
         addNativeButton(farmTab, "Equip Vacuum (Slot 5)", function()

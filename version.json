@@ -1,7 +1,7 @@
 {
-  "version": "6.0",
-  "versionNumber": 60,
+  "version": "6.1",
+  "versionNumber": 61,
   "gameCompatibility": "All Places (Lobby, Farmhouse, Basement) - Game Version v1068",
   "releaseDate": "2026-09-13",
-  "releaseNotes": "Fixes match-currency price formatting and classifies live barn-shop options as coins, gems, or Robux; removes lobby-only controls from the match; prevents automatic Robux prompts and duplicate hub runs; restores TNT harvesting combo and repairs sell, needle, gem, rare-hay, and player ESP cleanup."
+  "releaseNotes": "Only collects the revealed real needle objective, labels its unrevealed hay area correctly, prioritizes circular digging around the known target and reachable hay edges, and aims TNT with a feasible ballistic throw before returning to the best tool. Remote farming beyond the game's existing range is not claimed."
 }
