@@ -1,7 +1,7 @@
 {
-  "version": "5.8",
-  "versionNumber": 58,
+  "version": "5.9",
+  "versionNumber": 59,
   "gameCompatibility": "All Places (Lobby, Farmhouse, Basement) - Game Version v1068",
   "releaseDate": "2026-09-13",
-  "releaseNotes": "Adds a default no-teleport gameplay mode: the player remains fully controllable while nearby hay, gems, tools, upgrades, Drone deployment, TNT, and server-authorized selling continue automatically. Legacy teleport farming remains optional."
+  "releaseNotes": "Streamlines the lobby to account, permanent-upgrade, store, and essential settings views. Permanent upgrades now show server-replicated level, current bonus, next bonus, and configured gem price; generic codes, class automation, class slots, pets, chests, match-entry, display-mode, diagnostics, and about controls were removed."
 }
