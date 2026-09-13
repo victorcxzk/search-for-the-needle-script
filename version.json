@@ -1,7 +1,7 @@
 {
-  "version": "5.3",
-  "versionNumber": 53,
+  "version": "5.4",
+  "versionNumber": 54,
   "gameCompatibility": "All Places (Lobby, Farmhouse, Basement)",
   "releaseDate": "2026-09-13",
-  "releaseNotes": "Lobby/Game adaptive mode, sidebar layout fix, game PlaceVersion watcher, and Auto-TNT cleaver."
+  "releaseNotes": "Compact window geometry, strict viewport drag clamping, auto CanvasPosition reset, recursive remote mapping, and Ultimate Dumper v3.0."
 }
