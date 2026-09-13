@@ -1,7 +1,7 @@
 {
-  "version": "5.9",
-  "versionNumber": 59,
+  "version": "6.0",
+  "versionNumber": 60,
   "gameCompatibility": "All Places (Lobby, Farmhouse, Basement) - Game Version v1068",
   "releaseDate": "2026-09-13",
-  "releaseNotes": "Streamlines the lobby to account, permanent-upgrade, store, and essential settings views. Permanent upgrades now show server-replicated level, current bonus, next bonus, and configured gem price; generic codes, class automation, class slots, pets, chests, match-entry, display-mode, diagnostics, and about controls were removed."
+  "releaseNotes": "Fixes match-currency price formatting and classifies live barn-shop options as coins, gems, or Robux; removes lobby-only controls from the match; prevents automatic Robux prompts and duplicate hub runs; restores TNT harvesting combo and repairs sell, needle, gem, rare-hay, and player ESP cleanup."
 }

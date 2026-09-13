@@ -1,5 +1,5 @@
 --[[
-    SEARCH FOR THE NEEDLE - ULTIMATE AUTOMATION HUB v5.9 PRO
+    SEARCH FOR THE NEEDLE - ULTIMATE AUTOMATION HUB v6.0 PRO
     Forensically Engineered from Luau Decompiler Bytecode Dump
     - Exact Multi-Grab Batching using LocalPlayer:GetAttribute("HayGrabCount") & getGrabCandidates
     - Rainbow / RGB Straw Priority via Neon, Material, and Config.isRainbow(hayId)
@@ -58,6 +58,30 @@ if not LocalPlayer then
     return
 end
 
+-- Executor-only registry: a second load must stop the first set of loops.
+local RuntimeRegistry = nil
+if type(getgenv) == "function" then
+    local ok, env = pcall(getgenv)
+    if ok and type(env) == "table" then RuntimeRegistry = env end
+end
+if RuntimeRegistry and type(RuntimeRegistry.__NeedleHubRuntime) == "table" then
+    local previous = RuntimeRegistry.__NeedleHubRuntime
+    if type(previous.unload) == "function" then pcall(previous.unload) end
+end
+local ThisRuntime = {}
+if RuntimeRegistry then RuntimeRegistry.__NeedleHubRuntime = ThisRuntime end
+local HadLegacyHubArtifacts = false
+for _, parent in ipairs({CoreGui or workspace, LocalPlayer:FindFirstChild("PlayerGui") or workspace, workspace}) do
+    if parent then
+        for _, name in ipairs({"NeedleHubNative", "NeedleHubFloatingBtn", "NeedleHub_ESP"}) do
+            pcall(function()
+                local old = parent:FindFirstChild(name)
+                if old then HadLegacyHubArtifacts = true; old:Destroy() end
+            end)
+        end
+    end
+end
+
 local HubConnections = {}
 local HubThreads = {}
 local UIConnections = {}
@@ -105,7 +129,7 @@ else
     GAME_MODE_NAME = "Place " .. tostring(CURRENT_PLACE_ID)
 end
 local CURRENT_PLACE_NAME = GAME_MODE_NAME
-local SCRIPT_VERSION = "5.9"
+local SCRIPT_VERSION = "6.0"
 local CurrentContextMode = IS_LOBBY and "Lobby" or "Match"
 
 -- Require game Config if available for exact mathematical rainbow calculations
@@ -322,6 +346,7 @@ local function addLog(level, message)
 end
 
 addLog("info", "Initialized Hub v" .. SCRIPT_VERSION .. " on " .. GAME_MODE_NAME)
+if HadLegacyHubArtifacts then addLog("warn", "Interface antiga removida. Entre novamente na partida uma vez para encerrar loops de versoes anteriores a v6.0.") end
 
 -- SECTION 4: CHARACTER & MOVEMENT HELPERS
 local function getCharacter()
@@ -471,19 +496,26 @@ local function scanExactLandmarks()
         end
     end
 
-    -- Needle object in workspace
-    local needleObj = workspace:FindFirstChild("The Needle") or workspace:FindFirstChild("HiddenNeedleClient")
-    if needleObj then
-        if needleObj:IsA("BasePart") then
-            Landmarks.NeedleCFrame = needleObj.CFrame
-        elseif needleObj:IsA("Model") then
-            local p = needleObj.PrimaryPart or needleObj:FindFirstChildWhichIsA("BasePart")
-            if p then Landmarks.NeedleCFrame = p.CFrame end
-        end
+    -- The static "The Needle" model is decoration, not the live objective.
+    local needleFolder = workspace:FindFirstChild("HiddenNeedleClient")
+    if needleFolder then
+        local p = needleFolder:FindFirstChildWhichIsA("BasePart", true)
+        if p then Landmarks.NeedleCFrame = p.CFrame end
     end
 end
 
 scanExactLandmarks()
+
+if IS_GAMEPLAY and Remotes.GetHayState then
+    local snapshotThread = task.spawn(function()
+        local ok, snapshot = pcall(function() return Remotes.GetHayState:InvokeServer() end)
+        if IsHubLoaded and ok and type(snapshot) == "table"
+            and type(snapshot.needleHayId) == "number" and Landmarks.TargetNeedleHayId == nil then
+            Landmarks.TargetNeedleHayId = snapshot.needleHayId
+        end
+    end)
+    table.insert(HubThreads, snapshotThread)
+end
 
 if Remotes.NeedleTargetChanged then
     local conn = Remotes.NeedleTargetChanged.OnClientEvent:Connect(function(targetArg)
@@ -523,7 +555,7 @@ local HubState = {
     AutoBuyUpgrades = false,
     AutoEquipBestTool = true,
     AutoUseTnt = true,
-    TntInterval = 11,
+    TntInterval = 0,
     ForcedToolSlot = 0,
     FarmCooldown = 0.35,
     NoTeleportMode = true,
@@ -659,7 +691,8 @@ local function getBestAvailableToolSlot()
     if HubState.ForcedToolSlot and HubState.ForcedToolSlot > 0 then
         local forced = HubState.ForcedToolSlot
         local forcedToolId = SlotToolIds[forced]
-        if forcedToolId and isToolOwned(forcedToolId) then
+        if (forced == SLOT_HAND or forced == SLOT_PITCHFORK or forced == SLOT_VACUUM)
+            and forcedToolId and isToolOwned(forcedToolId) then
             return forced, ToolNames[forced] or ("Slot " .. tostring(forced))
         end
         HubState.ForcedToolSlot = 0
@@ -679,9 +712,21 @@ local function getBestAvailableToolSlot()
     return SLOT_HAND, "Hand"
 end
 
+local function getBestHarvestToolSlot()
+    local forced = HubState.ForcedToolSlot
+    if forced == SLOT_VACUUM and isVacuumReady() then return SLOT_VACUUM end
+    if forced == SLOT_PITCHFORK and isToolOwned("Pitchfork") then return SLOT_PITCHFORK end
+    if forced == SLOT_HAND then return SLOT_HAND end
+    if isVacuumReady() then return SLOT_VACUUM end
+    if isToolOwned("Pitchfork") then return SLOT_PITCHFORK end
+    return SLOT_HAND
+end
+
 local lastEquippedSlotLogged = -1
 local lastEquipAttemptAt = 0
 local stopVacuumAutomation
+local TntComboInProgress = false
+local lastAutoTntThrow = 0
 local function equipToolSlot(slotIndex, silent)
     if not slotIndex or type(slotIndex) ~= "number" then return false end
     local toolId = SlotToolIds[slotIndex]
@@ -716,35 +761,14 @@ local function equipToolSlot(slotIndex, silent)
         return false
     end
 
-    -- Compatibility fallback for place versions where HotbarSlots is unavailable.
-    local sentKey = false
-    pcall(function()
-        local vim = safeService("VirtualInputManager")
-        local keyMap = {
-            [1] = Enum.KeyCode.One,
-            [2] = Enum.KeyCode.Two,
-            [3] = Enum.KeyCode.Three,
-            [4] = Enum.KeyCode.Four,
-            [5] = Enum.KeyCode.Five,
-            [6] = Enum.KeyCode.Six,
-        }
-        if vim and keyMap[slotIndex] then
-            vim:SendKeyEvent(true, keyMap[slotIndex], false, game)
-            task.wait(0.015)
-            vim:SendKeyEvent(false, keyMap[slotIndex], false, game)
-            sentKey = true
-        end
-    end)
-    local equipped = sentKey and getCurrentEquippedSlot() == slotIndex
-    if equipped and not silent and lastEquippedSlotLogged ~= slotIndex then
-        lastEquippedSlotLogged = slotIndex
-        addLog("info", "Ferramenta equipada: " .. (ToolNames[slotIndex] or ("Slot " .. tostring(slotIndex))))
-    end
-    return equipped
+    -- Never synthesize a hotbar key: the locked Vacuum key opens a Robux prompt.
+    if not silent then addLog("warn", "HotbarSlots ainda nao esta disponivel; equipar foi adiado.") end
+    return false
 end
 
 -- Dedicated Autonomous TNT Thrower
 local function throwTntAt(targetPos)
+    if TntComboInProgress then return false end
     if not isToolOwned("Tnt") then
         addLog("warn", "TNT is not owned. Purchase it from the Barn shop!")
         return false
@@ -758,14 +782,22 @@ local function throwTntAt(targetPos)
         return false
     end
 
-    local prevSlot = getCurrentEquippedSlot()
+    TntComboInProgress = true
     if stopVacuumAutomation then stopVacuumAutomation() end
-    equipToolSlot(SLOT_TNT, true)
+    if not equipToolSlot(SLOT_TNT, true) then
+        TntComboInProgress = false
+        return false
+    end
     task.wait(0.06)
 
-    pcall(function()
+    local lit = pcall(function()
         tntAction:FireServer("light")
     end)
+    if not lit then
+        equipToolSlot(getBestHarvestToolSlot(), true)
+        TntComboInProgress = false
+        return false
+    end
     addLog("info", "TNT: Lit fuse match! Aiming at hay...")
 
     task.wait(0.48) -- Exact light duration from Config.TNT_LIGHT_TIME
@@ -777,19 +809,16 @@ local function throwTntAt(targetPos)
     local vel = dir * 44 + Vector3.new(0, 14, 0)
     local throwCF = CFrame.new(origin, target)
 
-    pcall(function()
+    local thrown = pcall(function()
         tntAction:FireServer("throw", throwCF, vel)
     end)
     addLog("info", "TNT: THROWN into hay mound! Massive explosive harvest pending!")
 
     task.wait(0.2)
-    if HubState.AutoEquipBestTool then
-        local bestSlot = getBestAvailableToolSlot()
-        equipToolSlot(bestSlot, true)
-    else
-        equipToolSlot(prevSlot > 0 and prevSlot or SLOT_HAND, true)
-    end
-    return true
+    equipToolSlot(getBestHarvestToolSlot(), true)
+    TntComboInProgress = false
+    if thrown then lastAutoTntThrow = os.clock() end
+    return thrown
 end
 
 local function getToolStatusSummary()
@@ -1134,7 +1163,7 @@ local farmThread = task.spawn(function()
         end
         task.wait(cooldown)
 
-        if HubState.AutoFarmHay and IS_GAMEPLAY and not isCurrentlySelling then
+        if HubState.AutoFarmHay and IS_GAMEPLAY and not isCurrentlySelling and not TntComboInProgress then
             local hrp = getHRP()
             local char = getCharacter()
 
@@ -1306,11 +1335,10 @@ end)
 table.insert(HubThreads, farmThread)
 
 -- 8.1b AUTONOMOUS TNT RECURRING CLEAVER ENGINE
-local lastAutoTntThrow = 0
 local tntThread = task.spawn(function()
     while IsHubLoaded do
         task.wait(1)
-        if HubState.AutoUseTnt and IS_GAMEPLAY and not isCurrentlySelling then
+        if HubState.AutoUseTnt and IS_GAMEPLAY and not isCurrentlySelling and not TntComboInProgress then
             local hrp = getHRP()
             if hrp and isToolOwned("Tnt") then
                 local currentHay = getHayHeld()
@@ -1321,7 +1349,6 @@ local tntThread = task.spawn(function()
                     or 20
                 local cd = math.max(serverCooldown, tonumber(HubState.TntInterval) or serverCooldown)
                 if (now - lastAutoTntThrow) >= cd and (maxCap - currentHay) >= 10 then
-                    lastAutoTntThrow = now
                     local target = nil
                     local rgbStrands = getAllRainbowStrands()
                     if #rgbStrands > 0 then
@@ -1509,20 +1536,60 @@ local function getCashBalance()
 end
 
 local function formatCash(value)
-    local cents = math.max(0, math.floor((tonumber(value) or 0) + 0.5))
+    -- Cash and Config.Levels.Cost are already decimal currency values.
+    local cents = math.max(0, math.round((tonumber(value) or 0) * 100))
     local dollars = math.floor(cents / 100)
     local digits = tostring(dollars):reverse():gsub("(%d%d%d)", "%1,"):reverse():gsub("^,", "")
     return "$" .. digits .. string.format(".%02d", cents % 100)
 end
 
+local function parseShopPrice(rawPrice)
+    local numeric = tonumber(rawPrice)
+    if numeric then return numeric end
+    if type(rawPrice) ~= "string" then return nil end
+    local cleaned = rawPrice:gsub(",", ""):gsub("[^%d%.]", "")
+    return tonumber(cleaned)
+end
+
+local RobuxPriceCache = {}
+local RobuxPricePending = {}
+local RobuxPriceFailureAt = {}
+local function getRobuxPrice(kind, productId)
+    local id = tonumber(productId)
+    if (kind ~= "Product" and kind ~= "GamePass") or not id or id <= 0 then return nil end
+    local key = kind .. ":" .. tostring(id)
+    if RobuxPriceCache[key] == false and os.clock() - (RobuxPriceFailureAt[key] or 0) >= 30 then
+        RobuxPriceCache[key] = nil
+    end
+    if RobuxPriceCache[key] ~= nil then return RobuxPriceCache[key] or nil end
+    if not RobuxPricePending[key] then
+        RobuxPricePending[key] = true
+        task.spawn(function()
+            local marketplace = safeService("MarketplaceService")
+            local infoType = kind == "GamePass" and Enum.InfoType.GamePass or Enum.InfoType.Product
+            local ok, result = pcall(function() return marketplace:GetProductInfoAsync(id, infoType) end)
+            RobuxPricePending[key] = nil
+            if IsHubLoaded then
+                RobuxPriceCache[key] = (ok and type(result) == "table" and tonumber(result.PriceInRobux)) or false
+                if RobuxPriceCache[key] == false then RobuxPriceFailureAt[key] = os.clock() end
+            end
+        end)
+    end
+    return nil
+end
+
 local function findBarnShopItem(itemId)
     local barnShop = workspace:FindFirstChild("BarnShop")
     if not barnShop then return nil end
-    if barnShop:GetAttribute("ShopItemId") == itemId then return barnShop end
     for _, item in ipairs(barnShop:GetDescendants()) do
-        if item:GetAttribute("ShopItemId") == itemId then
-            return item
+        if item:IsA("BasePart") and item.Name == "ShopHitbox" then
+            local shopModel = item.Parent
+            if shopModel and shopModel:GetAttribute("ShopItemId") == itemId then return shopModel end
         end
+    end
+    -- Compatibility with shop variants that publish the item without a hitbox.
+    for _, item in ipairs(barnShop:GetDescendants()) do
+        if item:GetAttribute("ShopItemId") == itemId then return item end
     end
     return nil
 end
@@ -1533,21 +1600,61 @@ local function getBarnToolInfo(itemId)
         id = itemId,
         displayName = BarnToolDisplayNames[itemId] or itemId,
         item = item,
-        currency = nil,
-        price = nil,
+        options = {},
+        purchaseOption = nil,
     }
     if not item then return info end
     info.displayName = tostring(item:GetAttribute("ShopName") or info.displayName)
     for _, suffix in ipairs({"A", "B", "C"}) do
         local currency = item:GetAttribute("ShopCurrency" .. suffix)
         local rawPrice = item:GetAttribute("ShopPrice" .. suffix)
-        if currency and currency ~= "Robux" and rawPrice ~= nil then
-            info.currency = tostring(currency)
-            info.price = tonumber(rawPrice)
-            if info.price then break end
+        if currency and rawPrice ~= nil and tostring(rawPrice) ~= "" then
+            local option = {
+                currency = tostring(currency),
+                price = parseShopPrice(rawPrice),
+                rawPrice = tostring(rawPrice),
+                robuxKind = item:GetAttribute("ShopRobuxKind" .. suffix),
+                robuxId = item:GetAttribute("ShopRobuxId" .. suffix),
+            }
+            if option.currency == "Robux" then
+                option.price = getRobuxPrice(option.robuxKind, option.robuxId)
+                if not option.price then
+                    local sign = item:FindFirstChild("Price", true)
+                    local worldText = sign and sign:IsA("TextLabel") and sign.Text or ""
+                    option.price = tonumber(worldText:match("^%s*R%$%s*(%d+)%s*$"))
+                end
+            elseif option.currency ~= "Coins" and option.currency ~= "Cash" and option.currency ~= "Gems" then
+                option.price = nil
+            end
+            table.insert(info.options, option)
+            if (option.currency == "Coins" or option.currency == "Cash") and option.price then
+                info.purchaseOption = option
+            elseif option.currency == "Gems" and option.price and not info.purchaseOption then
+                info.purchaseOption = option
+            end
         end
     end
     return info
+end
+
+local function formatShopOption(option)
+    if option.currency == "Robux" then
+        return option.price and (formatNumber(option.price) .. " Robux") or "Robux (valor indisponivel)"
+    end
+    if option.currency == "Gems" then
+        return (option.price and formatNumber(option.price) or option.rawPrice) .. " gemas"
+    end
+    if option.currency == "Coins" or option.currency == "Cash" then
+        return (option.price and formatCash(option.price) or option.rawPrice) .. " moedas"
+    end
+    return option.rawPrice .. " (" .. option.currency .. ")"
+end
+
+local function formatBarnToolPrice(info)
+    if #info.options == 0 then return "sem preco publicado nesta partida" end
+    local labels = {}
+    for _, option in ipairs(info.options) do table.insert(labels, formatShopOption(option)) end
+    return table.concat(labels, " / ")
 end
 
 local function requestBarnToolPurchase(itemId, manual)
@@ -1561,16 +1668,22 @@ local function requestBarnToolPurchase(itemId, manual)
     local pendingAt = PendingToolPurchases[itemId]
     if pendingAt and os.clock() - pendingAt < 5 then return false, "PENDING" end
     local info = getBarnToolInfo(itemId)
-    if not info.item or not info.price then
-        if manual then addLog("warn", "Preco de " .. info.displayName .. " ainda nao foi carregado pela loja.") end
+    if not info.item or #info.options == 0 then
+        if manual then addLog("warn", "A loja desta partida nao publicou uma opcao de compra para " .. info.displayName .. ".") end
         return false, "PRICE"
     end
-    local cash = getCashBalance()
-    if cash < info.price then
+    local option = info.purchaseOption
+    if not option then
+        if manual then addLog("warn", info.displayName .. " so tem opcao Robux: " .. formatBarnToolPrice(info) .. ". Use a loja oficial do jogo para confirmar a compra.") end
+        return false, "ROBUX_ONLY"
+    end
+    if not manual and option.currency == "Gems" then return false, "GEMS_AUTO_DISABLED" end
+    local balance = option.currency == "Gems" and getGemBalance() or getCashBalance()
+    if balance < option.price then
         if manual then
-            addLog("warn", string.format("Saldo insuficiente: %s custa %s; faltam %s.", info.displayName, formatCash(info.price), formatCash(info.price - cash)))
+            addLog("warn", string.format("Saldo insuficiente: %s custa %s; faltam %s.", info.displayName, formatShopOption(option), formatShopOption({currency = option.currency, price = option.price - balance})))
         end
-        return false, "CASH"
+        return false, option.currency == "Gems" and "GEMS" or "CASH"
     end
 
     PendingToolPurchases[itemId] = os.clock()
@@ -1578,7 +1691,7 @@ local function requestBarnToolPurchase(itemId, manual)
         Remotes.BuyShopItem:FireServer(itemId)
     end)
     if not ok then PendingToolPurchases[itemId] = nil end
-    if manual and ok then addLog("info", "Compra solicitada: " .. info.displayName .. " por " .. formatCash(info.price) .. ".") end
+    if manual and ok then addLog("info", "Compra solicitada: " .. info.displayName .. " por " .. formatShopOption(option) .. ".") end
     return ok, ok and "SENT" or "ERROR"
 end
 
@@ -1693,8 +1806,8 @@ local autoBuyThread = task.spawn(function()
             if HubState.AutoBuyTools then
                 for _, toolName in ipairs(barnToolNames) do
                     if not isToolOwned(toolName) then
-                        requestBarnToolPurchase(toolName, false)
-                        break
+                        local sent = requestBarnToolPurchase(toolName, false)
+                        if sent then break end
                     end
                 end
             end
@@ -1837,12 +1950,9 @@ end)
 table.insert(HubConnections, jumpConn)
 
 -- 8.8 ESP SYSTEM
-local ESPFolder = Instance.new("Folder")
-ESPFolder.Name = "NeedleHub_ESP"
-pcall(function() ESPFolder.Parent = CoreGui or workspace end)
-if not ESPFolder.Parent then ESPFolder.Parent = workspace end
-
+local ESPParent = LocalPlayer:WaitForChild("PlayerGui")
 local activeBillboards = {}
+local seenBillboards = {}
 
 local function updateBillboard(key, targetPart, text, color)
     if not targetPart or not targetPart:IsDescendantOf(workspace) then
@@ -1860,7 +1970,8 @@ local function updateBillboard(key, targetPart, text, color)
         bb.Size = UDim2.new(0, 160, 0, 26)
         bb.StudsOffset = Vector3.new(0, 2.5, 0)
         bb.AlwaysOnTop = true
-        bb.Parent = ESPFolder
+        -- BillboardGui renders reliably as a PlayerGui child with a Workspace Adornee.
+        bb.Parent = ESPParent
 
         local lbl = Instance.new("TextLabel")
         lbl.Name = "Label"
@@ -1878,7 +1989,8 @@ local function updateBillboard(key, targetPart, text, color)
 
     bb.Adornee = targetPart
     local lbl = bb:FindFirstChild("Label")
-    if lbl then lbl.Text = text end
+    if lbl then lbl.Text = text; lbl.TextColor3 = color end
+    seenBillboards[key] = true
 end
 
 local function removeBillboard(key)
@@ -1888,56 +2000,50 @@ local function removeBillboard(key)
     end
 end
 
-local sellAnchorPart = Instance.new("Part")
-sellAnchorPart.Name = "SellAnchorPart"
-sellAnchorPart.Size = Vector3.new(2, 2, 2)
-sellAnchorPart.Position = Landmarks.SellCow
-sellAnchorPart.Transparency = 1
-sellAnchorPart.Anchored = true
-sellAnchorPart.CanCollide = false
-sellAnchorPart.Parent = ESPFolder
-
 local espThread = task.spawn(function()
     while IsHubLoaded do
         task.wait(0.5)
+        seenBillboards = {}
         local myHRP = getHRP()
         local myPos = myHRP and myHRP.Position or Vector3.new(0, 0, 0)
 
         -- 1. Sell Zone ESP
         if HubState.SellESP and IS_GAMEPLAY then
-            local dist = math.floor((myPos - Landmarks.SellCow).Magnitude)
-            updateBillboard("SellZone", sellAnchorPart, "SELL COW [" .. dist .. "m]", Color3.fromRGB(50, 220, 255))
-        else
-            removeBillboard("SellZone")
+            local nearest, nearestDistance = nil, math.huge
+            for _, part in ipairs(CollectionService:GetTagged("SellPart")) do
+                if part:IsA("BasePart") and part:IsDescendantOf(workspace) then
+                    local distance = (myPos - part.Position).Magnitude
+                    if distance < nearestDistance then nearest, nearestDistance = part, distance end
+                end
+            end
+            if nearest then
+                updateBillboard("SellZone", nearest, "VENDA [" .. math.floor(nearestDistance) .. " studs]", Color3.fromRGB(50, 220, 255))
+            end
         end
 
         -- 2. Needle ESP
         if HubState.NeedleESP and IS_GAMEPLAY then
-            local needle = workspace:FindFirstChild("The Needle") or workspace:FindFirstChild("HiddenNeedleClient")
+            -- "The Needle" in Workspace is map decoration. The live objective is
+            -- placed inside HiddenNeedleClient or identified by NeedleTargetChanged.
+            local needle = workspace:FindFirstChild("HiddenNeedleClient")
             local targetHayId = Landmarks.TargetNeedleHayId
 
-            if needle then
-                local p = needle:IsA("BasePart") and needle or (needle:IsA("Model") and (needle.PrimaryPart or needle:FindFirstChildWhichIsA("BasePart")))
-                if p then
-                    local dist = math.floor((myPos - p.Position).Magnitude)
-                    updateBillboard("Needle", p, "THE NEEDLE [" .. dist .. "m]", Color3.fromRGB(255, 230, 0))
-                end
+            local visibleNeedle = needle and needle:FindFirstChildWhichIsA("BasePart", true)
+            if visibleNeedle then
+                local dist = math.floor((myPos - visibleNeedle.Position).Magnitude)
+                updateBillboard("Needle", visibleNeedle, "AGULHA [" .. dist .. " studs]", Color3.fromRGB(255, 230, 0))
             elseif targetHayId then
                 local haystack = workspace:FindFirstChild("HaystackClient")
                 if haystack then
                     for _, p in ipairs(haystack:GetChildren()) do
                         if p:IsA("BasePart") and p:GetAttribute("HayId") == targetHayId then
                             local dist = math.floor((myPos - p.Position).Magnitude)
-                            updateBillboard("Needle", p, "THE NEEDLE [" .. dist .. "m]", Color3.fromRGB(255, 230, 0))
+                            updateBillboard("Needle", p, "AGULHA [" .. dist .. " studs]", Color3.fromRGB(255, 230, 0))
                             break
                         end
                     end
                 end
-            else
-                removeBillboard("Needle")
             end
-        else
-            removeBillboard("Needle")
         end
 
         -- 3. Gem ESP
@@ -1945,14 +2051,14 @@ local espThread = task.spawn(function()
             local gemsFolder = workspace:FindFirstChild("GemsClient")
             if gemsFolder then
                 for _, gem in ipairs(gemsFolder:GetChildren()) do
-                    if gem:IsA("BasePart") then
+                    if gem:IsA("BasePart") and gem:GetAttribute("GemId") then
                         local dist = math.floor((myPos - gem.Position).Magnitude)
-                        updateBillboard("Gem_" .. gem.Name, gem, "GEM [" .. dist .. "m]", Color3.fromRGB(120, 255, 120))
-                    elseif gem:IsA("Model") then
-                        local p = gem.PrimaryPart or gem:FindFirstChildWhichIsA("BasePart")
+                        updateBillboard("Gem_" .. tostring(gem:GetAttribute("GemId")), gem, "GEMA [" .. dist .. " studs]", Color3.fromRGB(120, 255, 120))
+                    elseif gem:IsA("Model") and gem.Name:match("^Gem_") then
+                        local p = gem.PrimaryPart or gem:FindFirstChildWhichIsA("BasePart", true)
                         if p then
                             local dist = math.floor((myPos - p.Position).Magnitude)
-                            updateBillboard("Gem_" .. gem.Name, p, "GEM [" .. dist .. "m]", Color3.fromRGB(120, 255, 120))
+                            updateBillboard("Gem_" .. tostring(p:GetAttribute("GemId") or gem.Name), p, "GEMA [" .. dist .. " studs]", Color3.fromRGB(120, 255, 120))
                         end
                     end
                 end
@@ -1969,7 +2075,7 @@ local espThread = task.spawn(function()
                         count = count + 1
                         if count <= 25 then
                             local dist = math.floor((myPos - p.Position).Magnitude)
-                            updateBillboard("RGB_" .. tostring(p:GetAttribute("HayId") or count), p, "RGB STRAW [" .. dist .. "m]", Color3.fromRGB(255, 100, 255))
+                            updateBillboard("RGB_" .. tostring(p:GetAttribute("HayId") or count), p, "FENO RARO [" .. dist .. " studs]", Color3.fromRGB(255, 100, 255))
                         end
                     end
                 end
@@ -1983,45 +2089,19 @@ local espThread = task.spawn(function()
                     local pRoot = plr.Character:FindFirstChild("HumanoidRootPart")
                     if pRoot then
                         local dist = math.floor((myPos - pRoot.Position).Magnitude)
-                        updateBillboard("Player_" .. plr.Name, pRoot, plr.DisplayName .. " [" .. dist .. "m]", Color3.fromRGB(255, 255, 255))
+                        updateBillboard("Player_" .. plr.Name, pRoot, plr.DisplayName .. " [" .. dist .. " studs]", Color3.fromRGB(255, 255, 255))
                     end
                 end
             end
         end
+        local staleKeys = {}
+        for key in pairs(activeBillboards) do
+            if not seenBillboards[key] then table.insert(staleKeys, key) end
+        end
+        for _, key in ipairs(staleKeys) do removeBillboard(key) end
     end
 end)
 table.insert(HubThreads, espThread)
-
--- Robux Marketplace Prompt Helper (Explicitly tagged)
-local function promptRobuxPurchase(kind, id, itemName)
-    local numId = tonumber(id)
-    if not numId or numId <= 0 then
-        -- If no direct ID, try finding and clicking in-game GUI button
-        addLog("warn", "[ROBUX] Tentando abrir compra de " .. tostring(itemName) .. " via interface...")
-        local pGui = LocalPlayer:FindFirstChild("PlayerGui")
-        if pGui then
-            local gpUi = pGui:FindFirstChild("GamepassUI")
-            if gpUi then
-                local btn = gpUi:FindFirstChild("DoubleGemsButton", true)
-                if btn and firesignal then
-                    firesignal(btn.Activated)
-                    return
-                end
-            end
-        end
-        addLog("warn", "[ROBUX] ID numerico nao configurado para: " .. tostring(itemName))
-        return
-    end
-    addLog("warn", "[ROBUX] Solicitando confirmacao oficial da Roblox para: " .. tostring(itemName) .. " (ID " .. tostring(numId) .. ")")
-    pcall(function()
-        local MarketplaceService = safeService("MarketplaceService")
-        if kind == "GamePass" then
-            MarketplaceService:PromptGamePassPurchase(LocalPlayer, numId)
-        else
-            MarketplaceService:PromptProductPurchase(LocalPlayer, numId)
-        end
-    end)
-end
 
 -- 8.10 UNLOAD / DESTROY HUB
 local function unloadHub()
@@ -2045,7 +2125,9 @@ local function unloadHub()
 
     toggleFly(false)
 
-    pcall(function() if ESPFolder then ESPFolder:Destroy() end end)
+    local billboardKeys = {}
+    for key in pairs(activeBillboards) do table.insert(billboardKeys, key) end
+    for _, key in ipairs(billboardKeys) do removeBillboard(key) end
     pcall(function() if GlobalScreenGui then GlobalScreenGui:Destroy() end end)
     pcall(function() if FloatingButtonGui then FloatingButtonGui:Destroy() end end)
 
@@ -2059,9 +2141,13 @@ local function unloadHub()
     end)
 
     addLog("info", "Needle Hub unloaded cleanly.")
+    if RuntimeRegistry and RuntimeRegistry.__NeedleHubRuntime == ThisRuntime then
+        RuntimeRegistry.__NeedleHubRuntime = nil
+    end
 end
+ThisRuntime.unload = unloadHub
 
----- SECTION 9: USER INTERFACE (CYBER GLASS ADAPTIVE HUD v5.9 PRO)
+---- SECTION 9: USER INTERFACE (CYBER GLASS ADAPTIVE HUD v6.0 PRO)
 
 -- Helper: Smooth Tweening
 local function tweenGui(obj, props, duration, style, direction)
@@ -3076,28 +3162,6 @@ local function buildNativeUI()
             end)
         end)
 
-        addNativeSection(lobbyShopTab, "Loja Robux (Pago com Robux Real)", Color3.fromRGB(245, 158, 11))
-        addNativeParagraph(lobbyShopTab, "ATENCAO - PRODUTO PAGO COM ROBUX", "Os itens abaixo custam ROBUX reais da sua conta Roblox! Clicar em qualquer opcao abrira a confirmacao oficial da Roblox.", Color3.fromRGB(245, 158, 11))
-        
-        addNativeButton(lobbyShopTab, "[ROBUX] 2x Gemas Permanente (Gamepass 99 R$)", function()
-            promptRobuxPurchase("GamePass", 0, "2x Gemas")
-        end, false, "robux")
-        addNativeButton(lobbyShopTab, "[ROBUX] Mochila Infinita (Infinite Bag Gamepass)", function()
-            promptRobuxPurchase("GamePass", 0, "Mochila Infinita")
-        end, false, "robux")
-        addNativeButton(lobbyShopTab, "[ROBUX] Forquilha Permanente (Permanent Pitchfork)", function()
-            promptRobuxPurchase("GamePass", 0, "Permanent Pitchfork")
-        end, false, "robux")
-        addNativeButton(lobbyShopTab, "[ROBUX] Aspirador Permanente (Permanent Vacuum)", function()
-            promptRobuxPurchase("GamePass", 0, "Permanent Vacuum")
-        end, false, "robux")
-        addNativeButton(lobbyShopTab, "[ROBUX] TNT Permanente (Permanent TNT)", function()
-            promptRobuxPurchase("GamePass", 0, "Permanent TNT")
-        end, false, "robux")
-        addNativeButton(lobbyShopTab, "[ROBUX] Drone Permanente (Permanent Drone)", function()
-            promptRobuxPurchase("GamePass", 0, "Permanent Drone")
-        end, false, "robux")
-
         -- Default Lobby Tab Selection
         selectTab("Inicio")
 
@@ -3138,7 +3202,7 @@ local function buildNativeUI()
             HubState.AutoUseTnt = val
             addLog("info", "Auto-Use TNT: " .. tostring(val))
         end)
-        addNativeSlider(farmTab, "Intervalo do TNT (segundos)", 8, 60, HubState.TntInterval, function(val)
+        addNativeSlider(farmTab, "Espera extra do TNT (0 = cooldown)", 0, 60, HubState.TntInterval, function(val)
             HubState.TntInterval = val
         end)
         addNativeToggle(farmTab, "Prioritize Rare / RGB / Void (20x Value)", HubState.PrioritizeRGB, function(val)
@@ -3224,8 +3288,8 @@ local function buildNativeUI()
 
         -- 2. Barn Shop Tab (live prices and ownership from the match)
         addNativeSection(shopTab, "Ferramentas do Celeiro", Color3.fromRGB(99, 102, 241))
-        local matchCashCard = addNativeParagraph(shopTab, "Dinheiro da partida", formatCash(getCashBalance()) .. " disponivel | Precos lidos diretamente da loja do celeiro.", Color3.fromRGB(99, 102, 241))
-        addNativeParagraph(shopTab, "Compra automatica segura", "Segue a progressao Forquilha > TNT > Drone > Aspirador. Compra apenas um item por vez e somente quando houver saldo.", Color3.fromRGB(99, 102, 241))
+        local matchCashCard = addNativeParagraph(shopTab, "Saldo da partida", formatCash(getCashBalance()) .. " moedas | " .. formatNumber(getGemBalance()) .. " gemas. Opcoes da loja oficial.", Color3.fromRGB(99, 102, 241))
+        addNativeParagraph(shopTab, "Compra automatica segura", "Tenta Forquilha > TNT > Drone > Aspirador. Usa apenas moedas da partida; nunca abre Robux nem gasta gemas automaticamente.", Color3.fromRGB(99, 102, 241))
         
         addNativeToggle(shopTab, "Auto Buy Barn Tools (Feno)", HubState.AutoBuyTools, function(val)
             HubState.AutoBuyTools = val
@@ -3267,7 +3331,7 @@ local function buildNativeUI()
             while IsHubLoaded and matchCashCard and matchCashCard.Parent do
                 task.wait(0.75)
                 pcall(function()
-                    matchCashCard.Text = formatCash(getCashBalance()) .. " disponivel | Precos lidos diretamente da loja do celeiro."
+                    matchCashCard.Text = formatCash(getCashBalance()) .. " moedas | " .. formatNumber(getGemBalance()) .. " gemas. Opcoes da loja oficial."
                     for toolId, button in pairs(toolPurchaseButtons) do
                         if button and button.Parent then
                             local info = getBarnToolInfo(toolId)
@@ -3276,10 +3340,8 @@ local function buildNativeUI()
                                 button.Text = "[COMPRADO] " .. name
                             elseif PendingToolPurchases[toolId] and os.clock() - PendingToolPurchases[toolId] < 5 then
                                 button.Text = "Processando " .. name .. "..."
-                            elseif info.price then
-                                button.Text = "Comprar " .. name .. " - " .. formatCash(info.price)
                             else
-                                button.Text = name .. " - preco carregando..."
+                                button.Text = name .. " - " .. formatBarnToolPrice(info)
                             end
                         end
                     end
@@ -3304,66 +3366,6 @@ local function buildNativeUI()
             end
         end)
 
-        addNativeSection(shopTab, "Melhorias Permanentes (Moeda: Gemas)", Color3.fromRGB(52, 211, 153))
-        local matchGemsCard = addNativeParagraph(shopTab, "Gemas da Conta", "Saldo atual: " .. formatNumber(getGemBalance()) .. " gemas | Melhorias permanentes da conta.", Color3.fromRGB(52, 211, 153))
-        task.spawn(function()
-            while IsHubLoaded and matchGemsCard and matchGemsCard.Parent do
-                task.wait(1.5)
-                pcall(function()
-                    if matchGemsCard and matchGemsCard.Parent then
-                        matchGemsCard.Text = "Saldo atual: " .. formatNumber(getGemBalance()) .. " gemas | Melhorias permanentes da conta."
-                    end
-                end)
-            end
-        end)
-        
-        addNativeButton(shopTab, "+5 de capacidade da mochila", function()
-            if Remotes.BuyUpgrade then
-                pcall(function() Remotes.BuyUpgrade:FireServer("ExtraHoldAmount") end)
-                addLog("info", "Comprado upgrade de Gemas: ExtraHoldAmount")
-            end
-        end, false, "gem")
-        addNativeButton(shopTab, "+1 feno por coleta", function()
-            if Remotes.BuyUpgrade then
-                pcall(function() Remotes.BuyUpgrade:FireServer("ExtraTakeAmount") end)
-                addLog("info", "Comprado upgrade de Gemas: ExtraTakeAmount")
-            end
-        end, false, "gem")
-        addNativeButton(shopTab, "+1 gema por coleta", function()
-            if Remotes.BuyUpgrade then
-                pcall(function() Remotes.BuyUpgrade:FireServer("GemValue") end)
-                addLog("info", "Comprado upgrade de Gemas: GemValue")
-            end
-        end, false, "gem")
-        addNativeButton(shopTab, "+10% no valor do feno", function()
-            if Remotes.BuyUpgrade then
-                pcall(function() Remotes.BuyUpgrade:FireServer("ExtraHayValuePercentage") end)
-                addLog("info", "Comprado upgrade de Gemas: ExtraHayValuePercentage")
-            end
-        end, false, "gem")
-
-        addNativeSection(shopTab, "Loja Robux (Pago com Robux Real)", Color3.fromRGB(245, 158, 11))
-        addNativeParagraph(shopTab, "ATENCAO - PRODUTO PAGO COM ROBUX", "Os itens abaixo custam ROBUX reais da sua conta Roblox! Clicar em qualquer opcao abrira a confirmacao oficial da Roblox.", Color3.fromRGB(245, 158, 11))
-        
-        addNativeButton(shopTab, "[ROBUX] 2x Gemas Permanente (Gamepass 99 R$)", function()
-            promptRobuxPurchase("GamePass", 0, "2x Gemas")
-        end, false, "robux")
-        addNativeButton(shopTab, "[ROBUX] Mochila Infinita (Infinite Bag Gamepass)", function()
-            promptRobuxPurchase("GamePass", 0, "Mochila Infinita")
-        end, false, "robux")
-        addNativeButton(shopTab, "[ROBUX] Forquilha Permanente (Permanent Pitchfork)", function()
-            promptRobuxPurchase("GamePass", 0, "Permanent Pitchfork")
-        end, false, "robux")
-        addNativeButton(shopTab, "[ROBUX] Aspirador Permanente (Permanent Vacuum)", function()
-            promptRobuxPurchase("GamePass", 0, "Permanent Vacuum")
-        end, false, "robux")
-        addNativeButton(shopTab, "[ROBUX] TNT Permanente (Permanent TNT)", function()
-            promptRobuxPurchase("GamePass", 0, "Permanent TNT")
-        end, false, "robux")
-        addNativeButton(shopTab, "[ROBUX] Drone Permanente (Permanent Drone)", function()
-            promptRobuxPurchase("GamePass", 0, "Permanent Drone")
-        end, false, "robux")
-
         -- 3. Teleport Tab
         addNativeSection(teleTab, "Locais do mapa", Color3.fromRGB(99, 102, 241))
         addNativeButton(teleTab, "Teleport to Hay Mound", function()
@@ -3378,19 +3380,6 @@ local function buildNativeUI()
             teleportTo(Landmarks.FarmerNPC)
             addLog("info", "Teleported to Farmer NPC")
         end)
-        addNativeButton(teleTab, "Teleport to Needle", function()
-            local needle = findNeedle()
-            if needle then
-                local pos = needle:IsA("BasePart") and needle.Position or (needle:IsA("Model") and needle:GetPivot().Position)
-                if pos then
-                    teleportTo(pos + Vector3.new(0, 3, 0))
-                    addLog("info", "Teleported directly to Needle!")
-                end
-            else
-                addLog("warn", "Needle not currently revealed!")
-            end
-        end)
-
         addNativeSection(teleTab, "Servidor", Color3.fromRGB(99, 102, 241))
         addNativeButton(teleTab, "Return to Lobby Server", function()
             if Remotes.ReturnToLobby then Remotes.ReturnToLobby:FireServer() end
