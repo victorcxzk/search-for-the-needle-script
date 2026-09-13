@@ -416,12 +416,15 @@ end
 -- SECTION 6: SAVE TO FILE & FINISH
 updateProgress("Salvando relatorio em disco...", 0.98)
 local fullReport = table.concat(report, "\n")
-local fileName1 = "forensics_v3.txt"
-local fileName2 = "forensics.txt"
+local locTag = (placeType == "LOBBY") and "lobby" or "match"
+local fileName1 = "forensics_" .. locTag .. ".txt"
+local fileName2 = "forensics_v3.txt"
+local fileName3 = "forensics.txt"
 
 if write_file then
     pcall(function() write_file(fileName1, fullReport) end)
     pcall(function() write_file(fileName2, fullReport) end)
+    pcall(function() write_file(fileName3, fullReport) end)
 end
 
 updateProgress("DUMP CONCLUIDO COM SUCESSO!", 1.0)
