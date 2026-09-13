@@ -2932,7 +2932,34 @@ local function buildNativeUI()
         addNativeSection(setTab, "Forensic Tools")
         addNativeButton(setTab, "Executar Dumper Forense v3.1 (Salvar Jogo)", function()
             addLog("info", "Iniciando Dumper Forense v3.1...")
-            loadstring(game:HttpGet("https://raw.githubusercontent.com/victorcxzk/search-for-the-needle-script/master/dumper.lua"))()
+            task.spawn(function()
+                local code = nil
+                pcall(function()
+                    if readfile and isfile and isfile("dumper.lua") then
+                        code = readfile("dumper.lua")
+                    end
+                end)
+                if not code or #code == 0 then
+                    pcall(function()
+                        code = game:HttpGet("https://raw.githubusercontent.com/victorcxzk/search-for-the-needle-script/master/dumper.lua")
+                    end)
+                end
+                if not code or #code == 0 then
+                    addLog("error", "Nao foi possivel carregar o codigo do dumper.")
+                    return
+                end
+                local fn, err = loadstring(code)
+                if not fn then
+                    addLog("error", "Erro ao compilar dumper: " .. tostring(err))
+                    return
+                end
+                local ok, runErr = pcall(fn)
+                if not ok then
+                    addLog("error", "Erro na execucao do dumper: " .. tostring(runErr))
+                else
+                    addLog("info", "Dumper Forense v3.1 executado com sucesso!")
+                end
+            end)
         end)
 
         addNativeSection(setTab, "Hub Information")

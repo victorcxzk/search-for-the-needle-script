@@ -1,8 +1,8 @@
 --[[
     SEARCH FOR THE NEEDLE - ULTIMATE FORENSIC DUMPER v3.1
     Ultra-Resilient Game Explorer & Reverse Engineering Scanner
-    - Live On-Screen Visual Progress HUD (never silent)
-    - Zero-Hang Safe Architecture (no indefinite yields)
+    - Live On-Screen Visual Progress HUD
+    - Zero-Hang Safe Architecture
     - ReplicatedStorage Tree & Full Remote Catalog
     - Targeted Module & Config Inspection
     - Workspace Prompts, Models, Spawns & CollectionService Tags
@@ -122,8 +122,8 @@ local function out(str)
 end
 
 local function header(title)
-    out("
-" .. string.rep("=", 64))
+    out("")
+    out(string.rep("=", 64))
     out("[FORENSICS] " .. string.upper(title))
     out(string.rep("=", 64))
 end
@@ -135,24 +135,23 @@ local function serializeTable(tbl, maxDepth, currentDepth, indent)
     indent = indent or "  "
     if currentDepth > maxDepth then return indent .. "... (max depth reached)" end
 
-    local lines = {}
+    local tLines = {}
     for k, v in pairs(tbl) do
         local kStr = tostring(k)
         local vType = type(v)
         if vType == "table" then
-            table.insert(lines, indent .. kStr .. " (table) = {")
-            table.insert(lines, serializeTable(v, maxDepth, currentDepth + 1, indent .. "  "))
-            table.insert(lines, indent .. "}")
+            table.insert(tLines, indent .. kStr .. " (table) = {")
+            table.insert(tLines, serializeTable(v, maxDepth, currentDepth + 1, indent .. "  "))
+            table.insert(tLines, indent .. "}")
         elseif vType == "function" then
-            table.insert(lines, indent .. kStr .. " = [function]")
+            table.insert(tLines, indent .. kStr .. " = [function]")
         elseif vType == "string" then
-            table.insert(lines, indent .. kStr .. " = "" .. tostring(v) .. """)
+            table.insert(tLines, indent .. kStr .. " = \"" .. tostring(v) .. "\"")
         else
-            table.insert(lines, indent .. kStr .. " = " .. tostring(v) .. " (" .. vType .. ")")
+            table.insert(tLines, indent .. kStr .. " = " .. tostring(v) .. " (" .. vType .. ")")
         end
     end
-    return table.concat(lines, "
-")
+    return table.concat(tLines, "\n")
 end
 
 -- SECTION 0: METADATA & PLACE CONTEXT
@@ -189,8 +188,7 @@ if LocalPlayer then
     end
     out("Total Player Attributes: " .. tostring(attrCount))
 
-    out("
---- Backpack Items ---")
+    out("--- Backpack Items ---")
     local bp = LocalPlayer:FindFirstChild("Backpack")
     if bp then
         for i, item in ipairs(bp:GetChildren()) do
@@ -200,8 +198,7 @@ if LocalPlayer then
         out("  Backpack not found")
     end
 
-    out("
---- Character Hierarchy & Equipped Tools ---")
+    out("--- Character Hierarchy & Equipped Tools ---")
     local char = LocalPlayer.Character
     if char then
         out("  Character Name: " .. char.Name)
@@ -262,8 +259,7 @@ if ReplicatedStorage then
 
     scanRS(ReplicatedStorage, "", 0)
 
-    out("
---- SUMMARY OF ALL REMOTES IN REPLICATED STORAGE ---")
+    out("--- SUMMARY OF ALL REMOTES IN REPLICATED STORAGE ---")
     out("Total Remotes Found: " .. tostring(#remotesFound))
     for i, r in ipairs(remotesFound) do
         out(string.format("  [%02d] %s -> %s", i, r.Class, r.Path))
@@ -271,13 +267,11 @@ if ReplicatedStorage then
 
     -- Target only modules containing Config, Data, Pet, Class, Code, Shop
     updateProgress("Inspecionando modulos de configuracao...", 0.5)
-    out("
---- TARGETED CONFIG & DATA MODULES INSPECTION ---")
+    out("--- TARGETED CONFIG & DATA MODULES INSPECTION ---")
     for _, mod in ipairs(modulesFound) do
         local mName = mod.Name:lower()
         if mName:find("config") or mName:find("data") or mName:find("pet") or mName:find("class") or mName:find("code") or mName:find("shop") or mName:find("upgrade") then
-            out("
-[Safe Config Module] " .. mod:GetFullName())
+            out("[Safe Config Module] " .. mod:GetFullName())
             local s, res = pcall(function() return require(mod) end)
             if s and type(res) == "table" then
                 out(serializeTable(res, 2, 0, "  "))
@@ -300,7 +294,7 @@ if Workspace then
         if desc:IsA("ProximityPrompt") then
             promptCount = promptCount + 1
             local parentPath = desc.Parent and desc.Parent:GetFullName() or "Nil"
-            out(string.format("  Prompt [%d]: ObjectText="%s" | ActionText="%s" | Hold=%.2fs | Dist=%.1f | Enabled=%s | Parent=%s",
+            out(string.format("  Prompt [%d]: ObjectText=\"%s\" | ActionText=\"%s\" | Hold=%.2fs | Dist=%.1f | Enabled=%s | Parent=%s",
                 promptCount, tostring(desc.ObjectText), tostring(desc.ActionText),
                 tonumber(desc.HoldDuration) or 0, tonumber(desc.MaxActivationDistance) or 0,
                 tostring(desc.Enabled), parentPath))
@@ -308,8 +302,7 @@ if Workspace then
     end
     out("Total ProximityPrompts: " .. tostring(promptCount))
 
-    out("
---- CollectionService Tags Scan ---")
+    out("--- CollectionService Tags Scan ---")
     local allTags = {}
     pcall(function() allTags = CollectionService:GetAllTags() end)
     out("Total Tags Found: " .. tostring(#allTags))
@@ -325,8 +318,7 @@ if Workspace then
         end
     end
 
-    out("
---- Workspace Root Level Children ---")
+    out("--- Workspace Root Level Children ---")
     for _, child in ipairs(Workspace:GetChildren()) do
         local pos = "N/A"
         if child:IsA("BasePart") then pos = tostring(child.Position)
@@ -366,7 +358,7 @@ if LocalPlayer then
                 if child.Name ~= "NeedleDumperHUD" and child.Name ~= "NeedleHubNative" and child.Name ~= "NeedleHubFloatingBtn" then
                     local line = indent .. "- " .. child.Name .. " [" .. child.ClassName .. "]"
                     if child:IsA("TextLabel") or child:IsA("TextButton") or child:IsA("TextBox") then
-                        line = line .. " Text="" .. tostring(child.Text) .. """
+                        line = line .. " Text=\"" .. tostring(child.Text) .. "\""
                     end
                     if child:IsA("GuiObject") then
                         line = line .. " Visible=" .. tostring(child.Visible)
@@ -396,7 +388,6 @@ if LocalPlayer then
         for _, desc in ipairs(pScripts:GetDescendants()) do
             if desc:IsA("LocalScript") or desc:IsA("ModuleScript") then
                 local fullName = desc:GetFullName()
-                -- Skip Roblox Core PlayerModule internals to prevent freezes
                 if not fullName:find("PlayerModule") and not fullName:find("RbxCharacterSounds") and not fullName:find("ChatScript") then
                     table.insert(gameScripts, desc)
                 end
@@ -405,10 +396,9 @@ if LocalPlayer then
         out("Total Game Client Scripts Found: " .. tostring(#gameScripts))
 
         for _, scr in ipairs(gameScripts) do
-            out("
-" .. string.rep("-", 50))
+            out("--------------------------------------------------")
             out("SCRIPT: " .. scr:GetFullName() .. " [" .. scr.ClassName .. "]")
-            out(string.rep("-", 50))
+            out("--------------------------------------------------")
             if decompiler then
                 local s, res = pcall(decompiler, scr)
                 if s and res and #res > 0 then
@@ -425,8 +415,7 @@ end
 
 -- SECTION 6: SAVE TO FILE & FINISH
 updateProgress("Salvando relatorio em disco...", 0.98)
-local fullReport = table.concat(report, "
-")
+local fullReport = table.concat(report, "\n")
 local fileName1 = "forensics_v3.txt"
 local fileName2 = "forensics.txt"
 
@@ -455,14 +444,12 @@ pcall(function()
     end
 end)
 
-print("
-==================================================")
+print("==================================================")
 print("[FORENSICS v3.1 COMPLETE!]")
 print("Salvo em: workspace/" .. fileName1 .. " e workspace/" .. fileName2)
 print("Tamanho: " .. #fullReport .. " bytes (" .. #report .. " linhas)")
 print("==================================================")
 
--- Fade out HUD after 6 seconds
 task.delay(6, function()
     if hudGui then
         pcall(function() hudGui:Destroy() end)
