@@ -1,7 +1,7 @@
 {
-  "version": "6.2",
-  "versionNumber": 62,
+  "version": "6.3",
+  "versionNumber": 63,
   "gameCompatibility": "Lobby/Farmhouse v1068; Basement PlaceVersion 510 (dump 2026-09-13)",
   "releaseDate": "2026-09-13",
-  "releaseNotes": "Adds a Basement chapter tab with live key, lever, puzzle and exit progress; highlights the next objective; optionally activates aimed nearby levers using the game's puzzle action; fixes key handling so it is used at the trapdoor only when the chapter is ready, without blocking harvest tools beforehand."
+  "releaseNotes": "Moves smart digging from the pile's bottom corners to the middle-to-upper rim, rotates target sectors with irregular golden-angle spacing, and applies the same height preference to rare hay and TNT while preserving real tool reach."
 }

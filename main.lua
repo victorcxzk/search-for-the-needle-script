@@ -1,5 +1,5 @@
 --[[
-    SEARCH FOR THE NEEDLE - ULTIMATE AUTOMATION HUB v6.2 PRO
+    SEARCH FOR THE NEEDLE - ULTIMATE AUTOMATION HUB v6.3 PRO
     Forensically Engineered from Luau Decompiler Bytecode Dump
     - Exact Multi-Grab Batching using LocalPlayer:GetAttribute("HayGrabCount") & getGrabCandidates
     - Rainbow / RGB Straw Priority via Neon, Material, and Config.isRainbow(hayId)
@@ -130,7 +130,7 @@ else
     GAME_MODE_NAME = "Place " .. tostring(CURRENT_PLACE_ID)
 end
 local CURRENT_PLACE_NAME = GAME_MODE_NAME
-local SCRIPT_VERSION = "6.2"
+local SCRIPT_VERSION = "6.3"
 local CurrentContextMode = IS_LOBBY and "Lobby" or "Match"
 
 -- Require game Config if available for exact mathematical rainbow calculations
@@ -1238,11 +1238,11 @@ local function getNearbyHayParts(origin, radius)
     local params = OverlapParams.new()
     params.FilterType = Enum.RaycastFilterType.Include
     params.FilterDescendantsInstances = {haystack}
-    params.MaxParts = 128
+    params.MaxParts = 256
     return workspace:GetPartBoundsInRadius(origin, radius, params)
 end
 
-local function getNearbyRainbowStrands(origin, radius)
+local function getNearbyRainbowStrands(origin, radius, droppedOrigin)
     local rgbList = {}
     for _, part in ipairs(getNearbyHayParts(origin, radius)) do
         if part:IsA("BasePart") and part:GetAttribute("HayId") and isRainbowStrand(part) then
@@ -1252,7 +1252,8 @@ local function getNearbyRainbowStrands(origin, radius)
     local dropped = workspace:FindFirstChild("DroppedHay")
     if dropped then
         for _, part in ipairs(dropped:GetChildren()) do
-            if part:IsA("BasePart") and (part.Position - origin).Magnitude <= 20 and isRainbowStrand(part) then
+            if part:IsA("BasePart") and (part.Position - (droppedOrigin or origin)).Magnitude <= 20
+                and isRainbowStrand(part) then
                 table.insert(rgbList, part)
             end
         end
@@ -1266,8 +1267,12 @@ local cachedNeedleHayId = nil
 local cachedNeedleHayPart = nil
 local lastNeedleHayLookupAt = 0
 local digSequence = 0
+local lastDigHayId = nil
 local hayGeometryFolder = nil
 local hayGeometryCenter = nil
+local hayGeometryMinY = nil
+local hayGeometryMaxY = nil
+local hayGeometryUpperRadius = nil
 local lastHayGeometryAt = 0
 
 local function getKnownNeedleHayPart(haystack)
@@ -1297,13 +1302,17 @@ local function getHayGeometryCenter(haystack)
     if not haystack then return nil end
     if haystack == hayGeometryFolder and hayGeometryCenter
         and os.clock() - lastHayGeometryAt < 20 then
-        return hayGeometryCenter
+        return hayGeometryCenter, hayGeometryMinY, hayGeometryMaxY, hayGeometryUpperRadius
     end
     local sumX, sumY, sumZ, count = 0, 0, 0, 0
-    for _, part in ipairs(haystack:GetChildren()) do
+    local minY, maxY = math.huge, -math.huge
+    local parts = haystack:GetChildren()
+    for _, part in ipairs(parts) do
         if part:IsA("BasePart") and type(part:GetAttribute("HayId")) == "number" then
             local pos = part.Position
             sumX, sumY, sumZ = sumX + pos.X, sumY + pos.Y, sumZ + pos.Z
+            minY = math.min(minY, pos.Y)
+            maxY = math.max(maxY, pos.Y)
             count = count + 1
         end
     end
@@ -1311,19 +1320,37 @@ local function getHayGeometryCenter(haystack)
     lastHayGeometryAt = os.clock()
     if count > 0 then
         hayGeometryCenter = Vector3.new(sumX / count, sumY / count, sumZ / count)
+        hayGeometryMinY, hayGeometryMaxY = minY, maxY
+        local midY = minY + (maxY - minY) * 0.5
+        local upperRadius = 0
+        for _, part in ipairs(parts) do
+            if part:IsA("BasePart") and type(part:GetAttribute("HayId")) == "number"
+                and part.Position.Y >= midY then
+                local dx = part.Position.X - hayGeometryCenter.X
+                local dz = part.Position.Z - hayGeometryCenter.Z
+                upperRadius = math.max(upperRadius, math.sqrt(dx * dx + dz * dz))
+            end
+        end
+        hayGeometryUpperRadius = upperRadius
         Landmarks.HayCenter = hayGeometryCenter
     else
         hayGeometryCenter = nil
+        hayGeometryMinY, hayGeometryMaxY, hayGeometryUpperRadius = nil, nil, nil
     end
-    return hayGeometryCenter
+    return hayGeometryCenter, hayGeometryMinY, hayGeometryMaxY, hayGeometryUpperRadius
 end
 
 local function chooseSmartHayPart(candidates, origin, maxDistance, haystack)
     if not haystack then return nil end
-    local center = getHayGeometryCenter(haystack)
+    local center, minY, maxY, upperRadius = getHayGeometryCenter(haystack)
     local needleHay = getKnownNeedleHayPart(haystack)
     local digRadius = tonumber(HaystackConfig and HaystackConfig.NEEDLE_DIG_RADIUS) or 5.5
-    local targetAngle = (digSequence * 2.399963229728653) % (math.pi * 2)
+    local targetAngle = (digSequence * 2.399963229728653 + math.sin(digSequence * 1.618) * 0.17)
+        % (math.pi * 2)
+    local heightSpan = minY and maxY and (maxY - minY) or 0
+    local minimumDigY = minY and (minY + heightSpan * 0.5) or -math.huge
+    local targetDigY = minY and (minY + heightSpan * (0.64 + 0.12 * math.sin(digSequence * 1.414))) or 0
+    local rimTarget = (upperRadius or 0) * (0.78 + 0.07 * math.sin(digSequence * 0.87))
     local chosen, bestScore = nil, -math.huge
 
     for _, part in ipairs(candidates) do
@@ -1331,11 +1358,15 @@ local function chooseSmartHayPart(candidates, origin, maxDistance, haystack)
             and type(part:GetAttribute("HayId")) == "number" then
             local offset = part.Position - origin
             local distance = offset.Magnitude
-            if distance <= maxDistance then
-                local score = -distance * 0.03
+            if distance <= maxDistance and (heightSpan < 1.5 or part.Position.Y >= minimumDigY) then
+                local score = -distance * 0.03 - math.abs(part.Position.Y - targetDigY) * 0.7
+                if part:GetAttribute("HayId") == lastDigHayId then score = score - 25 end
                 if center then
                     local dx, dz = part.Position.X - center.X, part.Position.Z - center.Z
-                    score = score + math.sqrt(dx * dx + dz * dz)
+                    local radius = math.sqrt(dx * dx + dz * dz)
+                    local angle = math.atan2(dz, dx)
+                    local angleError = math.abs((angle - targetAngle + math.pi) % (math.pi * 2) - math.pi)
+                    score = score - math.abs(radius - rimTarget) * 3 - angleError * 7
                 end
                 if needleHay then
                     local dx = part.Position.X - needleHay.Position.X
@@ -1344,7 +1375,7 @@ local function chooseSmartHayPart(candidates, origin, maxDistance, haystack)
                     if fromNeedle <= digRadius then
                         local angle = math.atan2(dz, dx)
                         local angleError = math.abs((angle - targetAngle + math.pi) % (math.pi * 2) - math.pi)
-                        score = score + 1000 - math.abs(fromNeedle - digRadius * 0.65) * 15 - angleError * 5
+                        score = score + 35 - math.abs(fromNeedle - digRadius * 0.65) * 5 - angleError * 6
                     end
                 end
                 if score > bestScore then chosen, bestScore = part, score end
@@ -1359,7 +1390,8 @@ chooseTntTarget = function(hrp)
     if not haystack then return nil end
     local origin = hrp.Position + Vector3.new(0, 2.5, 0)
     local feasibleRare, feasibleNormal = {}, {}
-    for _, part in ipairs(getNearbyHayParts(hrp.Position, 32)) do
+    local scanOrigin = hrp.Position + Vector3.new(0, 7, 0)
+    for _, part in ipairs(getNearbyHayParts(scanOrigin, 32)) do
         if part:IsA("BasePart") and part.Parent == haystack
             and type(part:GetAttribute("HayId")) == "number"
             and solveTntVelocity(origin, part.Position) then
@@ -1567,7 +1599,9 @@ local farmThread = task.spawn(function()
                     local rgbStrands = {}
                     if HubState.PrioritizeRGB then
                         if HubState.NoTeleportMode then
-                            rgbStrands = getNearbyRainbowStrands(myPos, getToolReach(activeSlot))
+                            local reach = getToolReach(activeSlot)
+                            local scanOrigin = myPos + Vector3.new(0, math.min(reach * 0.35, 6), 0)
+                            rgbStrands = getNearbyRainbowStrands(scanOrigin, reach, myPos)
                         else
                             rgbStrands = getAllRainbowStrands()
                         end
@@ -1575,18 +1609,25 @@ local farmThread = task.spawn(function()
 
                     local targetRgb = nil
                     if #rgbStrands > 0 then
-                        table.sort(rgbStrands, function(a, b)
-                            return (a.Position - myPos).Magnitude < (b.Position - myPos).Magnitude
-                        end)
+                        local rareHay = {}
+                        local nearestDropped, nearestDroppedDistance = nil, math.huge
                         for _, candidate in ipairs(rgbStrands) do
                             local isDropped = candidate.Parent and candidate.Parent.Name == "DroppedHay"
                             local reachable = isDropped and (candidate.Position - myPos).Magnitude <= 20
                                 or isHayWithinReach(candidate, myPos, activeSlot)
                             if not HubState.NoTeleportMode or reachable then
-                                targetRgb = candidate
-                                break
+                                if isDropped then
+                                    local dist = (candidate.Position - myPos).Magnitude
+                                    if dist < nearestDroppedDistance then
+                                        nearestDropped, nearestDroppedDistance = candidate, dist
+                                    end
+                                elseif candidate.Parent == haystack then
+                                    table.insert(rareHay, candidate)
+                                end
                             end
                         end
+                        targetRgb = nearestDropped or chooseSmartHayPart(rareHay, myPos,
+                            HubState.NoTeleportMode and getToolReach(activeSlot) or math.huge, haystack)
                     end
 
                     if targetRgb then
@@ -1612,13 +1653,18 @@ local farmThread = task.spawn(function()
                                 recentlyAttemptedStrands[rId].count = recentlyAttemptedStrands[rId].count + 1
                             end
 
-                            harvestWithEquippedTool(targetRgb)
+                            if harvestWithEquippedTool(targetRgb) then
+                                lastDigHayId = rId
+                                digSequence = digSequence + 1
+                            end
                         end
                     else
                         -- 3. NORMAL HAY HARVESTING (when 0 RGB straws remain on field)
                         if haystack then
                             local reach = getToolReach(activeSlot)
-                            local children = HubState.NoTeleportMode and getNearbyHayParts(myPos, reach) or haystack:GetChildren()
+                            local scanOrigin = myPos + Vector3.new(0, math.min(reach * 0.35, 6), 0)
+                            local children = HubState.NoTeleportMode and getNearbyHayParts(scanOrigin, reach)
+                                or haystack:GetChildren()
                             local primaryPart = chooseSmartHayPart(children, myPos,
                                 HubState.NoTeleportMode and reach or math.huge, haystack)
 
@@ -1628,12 +1674,14 @@ local farmThread = task.spawn(function()
                                     task.wait(0.04)
                                 end
 
+                                local selectedHayId = primaryPart:GetAttribute("HayId")
                                 if harvestWithEquippedTool(primaryPart) then
+                                    lastDigHayId = selectedHayId
                                     digSequence = digSequence + 1
                                 end
                             elseif HubState.NoTeleportMode and os.clock() - lastNoReachNoticeAt >= 8 then
                                 lastNoReachNoticeAt = os.clock()
-                                addLog("info", "Sem feno ao alcance da ferramenta. O personagem continua livre; o resultado de coletas distantes depende do servidor.")
+                                addLog("info", "Sem feno da metade superior ao alcance. Aproxime-se da lateral alta do monte; seu personagem continua livre.")
                             end
                         end
 
@@ -1677,7 +1725,7 @@ local tntThread = task.spawn(function()
                 local cd = math.max(serverCooldown, tonumber(HubState.TntInterval) or serverCooldown)
                 if (now - lastAutoTntThrow) >= cd and (maxCap - currentHay) >= 10 then
                     local target = chooseTntTarget(hrp)
-                    if target then throwTntAt(target) end
+                    if target and throwTntAt(target) then digSequence = digSequence + 1 end
                 end
             end
         end
@@ -3514,7 +3562,7 @@ local function buildNativeUI()
             if val then stopVacuumAutomation() end
             addLog("info", "Modo sem teleporte: " .. tostring(val))
         end)
-        addNativeParagraph(farmTab, "Como funciona sem teleporte", "Voce anda livremente. A escavacao prioriza a area da agulha e as bordas, mas feno, TNT e gemas usam o alcance permitido pelo jogo. Compras, upgrades e Drone continuam globais. A venda pode aguardar voce se aproximar e olhar para a vaca.", Color3.fromRGB(99, 102, 241))
+        addNativeParagraph(farmTab, "Como funciona sem teleporte", "Escava na borda do meio para cima, variando setores. TNT e feno raro seguem a faixa; o alcance da ferramenta continua valendo.", Color3.fromRGB(99, 102, 241))
         addNativeToggle(farmTab, "Auto coletar feno ao alcance", HubState.AutoFarmHay, function(val)
             HubState.AutoFarmHay = val
             if not val then stopVacuumAutomation() end
@@ -3580,7 +3628,11 @@ local function buildNativeUI()
             local hrp = getHRP()
             if hrp then
                 local target = chooseTntTarget(hrp)
-                if target then throwTntAt(target) else addLog("info", "Nao ha feno no alcance real da TNT.") end
+                if target then
+                    if throwTntAt(target) then digSequence = digSequence + 1 end
+                else
+                    addLog("info", "Nao ha feno no alcance real da TNT.")
+                end
             end
         end, true)
         addNativeButton(farmTab, "Equip Vacuum (Slot 5)", function()
