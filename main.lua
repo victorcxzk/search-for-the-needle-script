@@ -1,12 +1,12 @@
 --[[
-    SEARCH FOR THE NEEDLE - ULTIMATE AUTOMATION HUB v6.3 PRO
+    SEARCH FOR THE NEEDLE - ULTIMATE AUTOMATION HUB v6.4 PRO
     Forensically Engineered from Luau Decompiler Bytecode Dump
     - Exact Multi-Grab Batching using LocalPlayer:GetAttribute("HayGrabCount") & getGrabCandidates
     - Rainbow / RGB Straw Priority via Neon, Material, and Config.isRainbow(hayId)
     - Auto Collect Gems via workspace.GemsClient & CollectGem(GemId)
     - Auto-Win Needle via PickHay("Objective"), slot equip, and Farmer hand-in
     - Full Autonomous Sell-Cycle at CollectionService:GetTagged("SellPart")
-    - Fixed Smooth Window Dragging, Minimize Button, Floating Menu Toggle & Unload Button
+    - Frosted Graphite UI with viewport-safe dragging, restore, reopen, and resizing
     - 3rd Person Camera & Right-Click 360 Orbiting
     - Zero Emojis - 100% Safe Execution
 ]]
@@ -130,7 +130,7 @@ else
     GAME_MODE_NAME = "Place " .. tostring(CURRENT_PLACE_ID)
 end
 local CURRENT_PLACE_NAME = GAME_MODE_NAME
-local SCRIPT_VERSION = "6.3"
+local SCRIPT_VERSION = "6.4"
 local CurrentContextMode = IS_LOBBY and "Lobby" or "Match"
 
 -- Require game Config if available for exact mathematical rainbow calculations
@@ -2524,7 +2524,30 @@ local function unloadHub()
 end
 ThisRuntime.unload = unloadHub
 
----- SECTION 9: USER INTERFACE (CYBER GLASS ADAPTIVE HUD v6.0 PRO)
+---- SECTION 9: USER INTERFACE (FROSTED GRAPHITE)
+
+local UI_THEME = {
+    shell = Color3.fromRGB(19, 26, 34),
+    header = Color3.fromRGB(27, 37, 47),
+    sidebar = Color3.fromRGB(22, 31, 40),
+    card = Color3.fromRGB(32, 43, 54),
+    cardHover = Color3.fromRGB(43, 57, 68),
+    border = Color3.fromRGB(117, 145, 157),
+    text = Color3.fromRGB(235, 243, 245),
+    muted = Color3.fromRGB(165, 184, 194),
+    accent = Color3.fromRGB(101, 213, 198),
+    accentDark = Color3.fromRGB(38, 78, 77),
+}
+
+local function getUIViewport()
+    local camera = workspace.CurrentCamera
+    return camera and camera.ViewportSize or Vector2.new(1280, 720)
+end
+
+local function clampToRange(value, low, high)
+    if low > high then return (low + high) * 0.5 end
+    return math.clamp(value, low, high)
+end
 
 -- Helper: Smooth Tweening
 local function tweenGui(obj, props, duration, style, direction)
@@ -2542,6 +2565,7 @@ local function createFloatingToggleButton(toggleCallback)
     floatGui.Name = "NeedleHubFloatingBtn"
     floatGui.ResetOnSpawn = false
     floatGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    floatGui.IgnoreGuiInset = true
     pcall(function() floatGui.Parent = CoreGui end)
     if not floatGui.Parent then floatGui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
     FloatingButtonGui = floatGui
@@ -2549,8 +2573,9 @@ local function createFloatingToggleButton(toggleCallback)
     local floatBtn = Instance.new("TextButton")
     floatBtn.Name = "MenuToggle"
     floatBtn.Size = UDim2.fromOffset(154, 42)
-    floatBtn.Position = UDim2.new(0, 16, 0.45, 0)
-    floatBtn.BackgroundColor3 = Color3.fromRGB(18, 20, 30)
+    floatBtn.Position = UDim2.fromOffset(16, getUIViewport().Y * 0.45)
+    floatBtn.BackgroundColor3 = UI_THEME.header
+    floatBtn.BackgroundTransparency = 0.08
     floatBtn.Text = ""
     floatBtn.AutoButtonColor = false
     floatBtn.Parent = floatGui
@@ -2560,23 +2585,17 @@ local function createFloatingToggleButton(toggleCallback)
     corner.Parent = floatBtn
 
     local stroke = Instance.new("UIStroke")
-    stroke.Color = Color3.fromRGB(99, 102, 241)
-    stroke.Thickness = 1.5
+    stroke.Color = UI_THEME.border
+    stroke.Transparency = 0.45
+    stroke.Thickness = 1
     stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
     stroke.Parent = floatBtn
 
-    local grad = Instance.new("UIGradient")
-    grad.Color = ColorSequence.new({
-        ColorSequenceKeypoint.new(0, Color3.fromRGB(26, 29, 44)),
-        ColorSequenceKeypoint.new(1, Color3.fromRGB(16, 18, 26))
-    })
-    grad.Parent = floatBtn
-
-    -- Glowing Dot Indicator
+    -- Compact launcher; it remains visible after the main window is hidden.
     local dot = Instance.new("Frame")
     dot.Size = UDim2.fromOffset(8, 8)
     dot.Position = UDim2.new(0, 12, 0.5, -4)
-    dot.BackgroundColor3 = Color3.fromRGB(56, 189, 248)
+    dot.BackgroundColor3 = UI_THEME.accent
     dot.BorderSizePixel = 0
     dot.Parent = floatBtn
     local dotCorner = Instance.new("UICorner")
@@ -2589,50 +2608,81 @@ local function createFloatingToggleButton(toggleCallback)
     lbl.Position = UDim2.fromOffset(26, 0)
     lbl.BackgroundTransparency = 1
     lbl.Text = "NEEDLE HUB"
-    lbl.TextColor3 = Color3.fromRGB(240, 245, 255)
-    lbl.Font = Enum.Font.GothamBold
+    lbl.TextColor3 = UI_THEME.text
+    lbl.Font = Enum.Font.GothamMedium
     lbl.TextSize = 13
     lbl.TextXAlignment = Enum.TextXAlignment.Left
     lbl.Parent = floatBtn
 
     -- Hover effect
     floatBtn.MouseEnter:Connect(function()
-        tweenGui(floatBtn, {BackgroundColor3 = Color3.fromRGB(28, 32, 50)}, 0.18)
-        tweenGui(stroke, {Color = Color3.fromRGB(129, 140, 248), Thickness = 2.0}, 0.18)
+        tweenGui(floatBtn, {BackgroundColor3 = UI_THEME.cardHover}, 0.18)
+        tweenGui(stroke, {Transparency = 0.2}, 0.18)
     end)
     floatBtn.MouseLeave:Connect(function()
-        tweenGui(floatBtn, {BackgroundColor3 = Color3.fromRGB(18, 20, 30)}, 0.18)
-        tweenGui(stroke, {Color = Color3.fromRGB(99, 102, 241), Thickness = 1.5}, 0.18)
+        tweenGui(floatBtn, {BackgroundColor3 = UI_THEME.header}, 0.18)
+        tweenGui(stroke, {Transparency = 0.45}, 0.18)
     end)
 
-    -- Draggable Floating Pill
+    local function clampFloat(x, y)
+        local vp = getUIViewport()
+        floatBtn.Position = UDim2.fromOffset(
+            clampToRange(x, 8, vp.X - floatBtn.Size.X.Offset - 8),
+            clampToRange(y, 48, vp.Y - floatBtn.Size.Y.Offset - 8)
+        )
+    end
+    clampFloat(floatBtn.Position.X.Offset, floatBtn.Position.Y.Offset)
+
+    -- Dragging the launcher never counts as a click, and cannot lose it off-screen.
     local dragging = false
-    local dragStart, startPos
+    local dragStart, startPos, activeTouch
+    local suppressClick = false
 
     floatBtn.InputBegan:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
             dragging = true
             dragStart = input.Position
             startPos = floatBtn.Position
+            activeTouch = input.UserInputType == Enum.UserInputType.Touch and input or nil
+            suppressClick = false
         end
     end)
 
     local dragEndConn = UserInputService.InputEnded:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input == activeTouch then
             dragging = false
+            activeTouch = nil
         end
     end)
     trackUIConnection(dragEndConn)
 
     local dragMoveConn = UserInputService.InputChanged:Connect(function(input)
-        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input == activeTouch) then
             local delta = input.Position - dragStart
-            floatBtn.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+            if delta.Magnitude > 6 then suppressClick = true end
+            clampFloat(startPos.X.Offset + delta.X, startPos.Y.Offset + delta.Y)
         end
     end)
     trackUIConnection(dragMoveConn)
 
-    floatBtn.MouseButton1Click:Connect(toggleCallback)
+    floatBtn.MouseButton1Click:Connect(function()
+        if not suppressClick then toggleCallback() end
+    end)
+
+    local floatCameraConnection
+    local function bindFloatCamera()
+        if floatCameraConnection then floatCameraConnection:Disconnect() end
+        local camera = workspace.CurrentCamera
+        if camera then
+            floatCameraConnection = camera:GetPropertyChangedSignal("ViewportSize"):Connect(function()
+                clampFloat(floatBtn.Position.X.Offset, floatBtn.Position.Y.Offset)
+            end)
+            trackUIConnection(floatCameraConnection)
+        end
+        clampFloat(floatBtn.Position.X.Offset, floatBtn.Position.Y.Offset)
+    end
+    trackUIConnection(workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(bindFloatCamera))
+    bindFloatCamera()
 end
 
 -- Version & GitHub Update Status Store
@@ -2673,7 +2723,7 @@ end
 -- Primary Modern Native UI Builder (Context-Aware: Lobby vs Match)
 local function buildNativeUI()
     local isLobbyMode = (CurrentContextMode == "Lobby")
-    addLog("info", "Construindo UI Cyber Glass (" .. (isLobbyMode and "MODO LOBBY" or "MODO JOGO") .. ")...")
+    addLog("info", "Construindo UI Frosted Graphite (" .. (isLobbyMode and "MODO LOBBY" or "MODO JOGO") .. ")...")
 
     clearUIConnections()
     if GlobalScreenGui then GlobalScreenGui:Destroy() end
@@ -2682,16 +2732,18 @@ local function buildNativeUI()
     screenGui.Name = "NeedleHubNative"
     screenGui.ResetOnSpawn = false
     screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    screenGui.IgnoreGuiInset = true
     pcall(function() screenGui.Parent = CoreGui end)
     if not screenGui.Parent then screenGui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
     GlobalScreenGui = screenGui
 
     -- Comfortable desktop canvas, scaled down only when the viewport requires it.
     local WIN_WIDTH = 800
-    local WIN_HEIGHT = 500
-    local TITLE_HEIGHT = 48
+    local WIN_HEIGHT = 520
+    local TITLE_HEIGHT = 52
     local SIDEBAR_WIDTH = 172
     local windowScale = 1
+    local isMinimized = false
 
     -- Main Window Frame
     local mainFrame = Instance.new("Frame")
@@ -2699,7 +2751,8 @@ local function buildNativeUI()
     mainFrame.Size = UDim2.fromOffset(WIN_WIDTH, WIN_HEIGHT)
     mainFrame.Position = UDim2.fromScale(0.5, 0.5)
     mainFrame.AnchorPoint = Vector2.new(0.5, 0.5)
-    mainFrame.BackgroundColor3 = Color3.fromRGB(13, 14, 20)
+    mainFrame.BackgroundColor3 = UI_THEME.shell
+    mainFrame.BackgroundTransparency = 0.1
     mainFrame.BorderSizePixel = 0
     mainFrame.ClipsDescendants = true
     mainFrame.Parent = screenGui
@@ -2708,83 +2761,95 @@ local function buildNativeUI()
     responsiveScale.Name = "ResponsiveScale"
     responsiveScale.Parent = mainFrame
 
-    local function updateResponsiveScale()
-        local camera = workspace.CurrentCamera
-        local viewport = camera and camera.ViewportSize or Vector2.new(1280, 720)
-        windowScale = math.clamp(math.min((viewport.X - 24) / WIN_WIDTH, (viewport.Y - 24) / WIN_HEIGHT), 0.55, 1)
-        responsiveScale.Scale = windowScale
+    local function clampWindowPosition(centerX, centerY, useFullHeight)
+        local viewport = getUIViewport()
+        local height = (useFullHeight == nil and not isMinimized or useFullHeight) and WIN_HEIGHT or TITLE_HEIGHT
+        local halfW = WIN_WIDTH * windowScale * 0.5
+        local halfH = height * windowScale * 0.5
+        local current = mainFrame.Position
+        centerX = centerX or viewport.X * current.X.Scale + current.X.Offset
+        centerY = centerY or viewport.Y * current.Y.Scale + current.Y.Offset
+        mainFrame.Position = UDim2.fromOffset(
+            clampToRange(centerX, halfW + 12, viewport.X - halfW - 12),
+            clampToRange(centerY, halfH + 48, viewport.Y - halfH - 12)
+        )
     end
-    updateResponsiveScale()
 
-    if workspace.CurrentCamera then
-        trackUIConnection(workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(updateResponsiveScale))
+    local function updateResponsiveScale()
+        local viewport = getUIViewport()
+        windowScale = math.max(0.1, math.min(1,
+            (viewport.X - 24) / WIN_WIDTH,
+            (viewport.Y - 60) / WIN_HEIGHT))
+        responsiveScale.Scale = windowScale
+        clampWindowPosition()
     end
+    local cameraViewportConnection
+    local function bindWindowCamera()
+        if cameraViewportConnection then cameraViewportConnection:Disconnect() end
+        local camera = workspace.CurrentCamera
+        if camera then
+            cameraViewportConnection = camera:GetPropertyChangedSignal("ViewportSize"):Connect(updateResponsiveScale)
+            trackUIConnection(cameraViewportConnection)
+        end
+        updateResponsiveScale()
+    end
+    trackUIConnection(workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(bindWindowCamera))
+    bindWindowCamera()
 
     local mainCorner = Instance.new("UICorner")
-    mainCorner.CornerRadius = UDim.new(0, 10)
+    mainCorner.CornerRadius = UDim.new(0, 14)
     mainCorner.Parent = mainFrame
 
     local mainStroke = Instance.new("UIStroke")
-    mainStroke.Color = Color3.fromRGB(48, 52, 74)
-    mainStroke.Thickness = 1.5
+    mainStroke.Color = UI_THEME.border
+    mainStroke.Transparency = 0.42
+    mainStroke.Thickness = 1
     mainStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
     mainStroke.Parent = mainFrame
 
     local mainGrad = Instance.new("UIGradient")
     mainGrad.Color = ColorSequence.new({
-        ColorSequenceKeypoint.new(0, Color3.fromRGB(16, 18, 28)),
-        ColorSequenceKeypoint.new(1, Color3.fromRGB(11, 12, 17))
+        ColorSequenceKeypoint.new(0, UI_THEME.header),
+        ColorSequenceKeypoint.new(1, UI_THEME.shell)
     })
-    mainGrad.Rotation = 45
+    mainGrad.Rotation = 90
     mainGrad.Parent = mainFrame
 
     -- Title Bar (Header)
     local titleBar = Instance.new("Frame")
     titleBar.Name = "TitleBar"
     titleBar.Size = UDim2.new(1, 0, 0, TITLE_HEIGHT)
-    titleBar.BackgroundColor3 = Color3.fromRGB(19, 21, 31)
+    titleBar.BackgroundColor3 = UI_THEME.header
+    titleBar.BackgroundTransparency = 0.08
     titleBar.BorderSizePixel = 0
     titleBar.Parent = mainFrame
 
     local titleCorner = Instance.new("UICorner")
-    titleCorner.CornerRadius = UDim.new(0, 10)
+    titleCorner.CornerRadius = UDim.new(0, 14)
     titleCorner.Parent = titleBar
 
-    -- Bottom border line on Title Bar with accent gradient
+    -- Quiet hairline keeps the frosted header distinct from the content.
     local headerLine = Instance.new("Frame")
     headerLine.Size = UDim2.new(1, 0, 0, 1)
     headerLine.Position = UDim2.new(0, 0, 1, -1)
     headerLine.BorderSizePixel = 0
-    headerLine.BackgroundColor3 = Color3.fromRGB(99, 102, 241)
+    headerLine.BackgroundColor3 = UI_THEME.border
+    headerLine.BackgroundTransparency = 0.64
     headerLine.Parent = titleBar
-
-    local headerLineGrad = Instance.new("UIGradient")
-    headerLineGrad.Color = ColorSequence.new({
-        ColorSequenceKeypoint.new(0, Color3.fromRGB(99, 102, 241)),
-        ColorSequenceKeypoint.new(0.5, Color3.fromRGB(168, 85, 247)),
-        ColorSequenceKeypoint.new(1, Color3.fromRGB(56, 189, 248))
-    })
-    headerLineGrad.Parent = headerLine
 
     -- Logo Badge Icon
     local logoIcon = Instance.new("Frame")
     logoIcon.Size = UDim2.fromOffset(28, 28)
     logoIcon.Position = UDim2.new(0, 12, 0.5, -14)
-    logoIcon.BackgroundColor3 = Color3.fromRGB(99, 102, 241)
+    logoIcon.BackgroundColor3 = UI_THEME.accentDark
     logoIcon.BorderSizePixel = 0
     logoIcon.Parent = titleBar
     local logoCorner = Instance.new("UICorner") logoCorner.CornerRadius = UDim.new(0, 6) logoCorner.Parent = logoIcon
-    local logoGrad = Instance.new("UIGradient")
-    logoGrad.Color = ColorSequence.new({
-        ColorSequenceKeypoint.new(0, Color3.fromRGB(99, 102, 241)),
-        ColorSequenceKeypoint.new(1, Color3.fromRGB(168, 85, 247))
-    })
-    logoGrad.Parent = logoIcon
     local logoText = Instance.new("TextLabel")
     logoText.Size = UDim2.fromScale(1, 1)
     logoText.BackgroundTransparency = 1
     logoText.Text = "N"
-    logoText.TextColor3 = Color3.fromRGB(255, 255, 255)
+    logoText.TextColor3 = UI_THEME.accent
     logoText.Font = Enum.Font.GothamBold
     logoText.TextSize = 15
     logoText.Parent = logoIcon
@@ -2795,42 +2860,39 @@ local function buildNativeUI()
     titleLabel.Position = UDim2.new(0, 50, 0.5, -14)
     titleLabel.BackgroundTransparency = 1
     titleLabel.Text = "NEEDLE HUB"
-    titleLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
-    titleLabel.Font = Enum.Font.GothamBold
-    titleLabel.TextSize = 14
+    titleLabel.TextColor3 = UI_THEME.text
+    titleLabel.Font = Enum.Font.GothamSemibold
+    titleLabel.TextSize = 15
     titleLabel.TextXAlignment = Enum.TextXAlignment.Left
     titleLabel.Parent = titleBar
 
-    -- Version Tag Pill
+    -- Context is rendered as quiet typography, not competing badges.
     local verPill = Instance.new("Frame")
     verPill.Size = UDim2.fromOffset(66, 20)
     verPill.Position = UDim2.new(0, 174, 0.5, -10)
-    verPill.BackgroundColor3 = Color3.fromRGB(30, 34, 52)
+    verPill.BackgroundTransparency = 1
     verPill.BorderSizePixel = 0
     verPill.Parent = titleBar
-    local verCorner = Instance.new("UICorner") verCorner.CornerRadius = UDim.new(0, 9) verCorner.Parent = verPill
-    local verStroke = Instance.new("UIStroke") verStroke.Color = Color3.fromRGB(80, 85, 125) verStroke.Thickness = 1 verStroke.Parent = verPill
     local verLbl = Instance.new("TextLabel")
     verLbl.Size = UDim2.fromScale(1, 1)
     verLbl.BackgroundTransparency = 1
-    verLbl.Text = "v" .. tostring(SCRIPT_VERSION) .. " PRO"
-    verLbl.TextColor3 = Color3.fromRGB(165, 180, 252)
-    verLbl.Font = Enum.Font.GothamBold
-    verLbl.TextSize = 10
+    verLbl.Text = "v" .. tostring(SCRIPT_VERSION)
+    verLbl.TextColor3 = UI_THEME.muted
+    verLbl.Font = Enum.Font.GothamMedium
+    verLbl.TextSize = 11
     verLbl.Parent = verPill
 
-    -- Status Pill (Match vs Lobby Context)
+    -- Match vs lobby context
     local statusPill = Instance.new("Frame")
     statusPill.Size = UDim2.fromOffset(112, 20)
     statusPill.Position = UDim2.new(0, 248, 0.5, -10)
-    statusPill.BackgroundColor3 = Color3.fromRGB(20, 26, 36)
+    statusPill.BackgroundTransparency = 1
     statusPill.BorderSizePixel = 0
     statusPill.Parent = titleBar
-    local statusCorner = Instance.new("UICorner") statusCorner.CornerRadius = UDim.new(0, 9) statusCorner.Parent = statusPill
     local statusDot = Instance.new("Frame")
     statusDot.Size = UDim2.fromOffset(6, 6)
     statusDot.Position = UDim2.new(0, 7, 0.5, -3)
-    statusDot.BackgroundColor3 = (CurrentContextMode == "Match") and Color3.fromRGB(34, 197, 94) or Color3.fromRGB(56, 189, 248)
+    statusDot.BackgroundColor3 = UI_THEME.accent
     statusDot.BorderSizePixel = 0
     statusDot.Parent = statusPill
     local sdc = Instance.new("UICorner") sdc.CornerRadius = UDim.new(1, 0) sdc.Parent = statusDot
@@ -2838,10 +2900,10 @@ local function buildNativeUI()
     statusLbl.Size = UDim2.new(1, -16, 1, 0)
     statusLbl.Position = UDim2.fromOffset(16, 0)
     statusLbl.BackgroundTransparency = 1
-    statusLbl.Text = (CurrentContextMode == "Match") and "MATCH MODE" or "LOBBY MODE"
-    statusLbl.TextColor3 = Color3.fromRGB(200, 210, 230)
+    statusLbl.Text = (CurrentContextMode == "Match") and "PARTIDA" or "LOBBY"
+    statusLbl.TextColor3 = UI_THEME.muted
     statusLbl.Font = Enum.Font.GothamMedium
-    statusLbl.TextSize = 10
+    statusLbl.TextSize = 11
     statusLbl.TextXAlignment = Enum.TextXAlignment.Left
     statusLbl.Parent = statusPill
 
@@ -2850,19 +2912,20 @@ local function buildNativeUI()
     gemPill.Name = "GemBalance"
     gemPill.Size = UDim2.fromOffset(112, 22)
     gemPill.Position = UDim2.new(0, 370, 0.5, -11)
-    gemPill.BackgroundColor3 = Color3.fromRGB(12, 42, 32)
+    gemPill.BackgroundColor3 = UI_THEME.accentDark
+    gemPill.BackgroundTransparency = 0.2
     gemPill.BorderSizePixel = 0
     gemPill.Parent = titleBar
     local gemCorner = Instance.new("UICorner") gemCorner.CornerRadius = UDim.new(0, 11) gemCorner.Parent = gemPill
-    local gemStroke = Instance.new("UIStroke") gemStroke.Color = Color3.fromRGB(16, 185, 129) gemStroke.Thickness = 1 gemStroke.Parent = gemPill
+    local gemStroke = Instance.new("UIStroke") gemStroke.Color = UI_THEME.accent gemStroke.Transparency = 0.35 gemStroke.Thickness = 1 gemStroke.Parent = gemPill
     local gemLabel = Instance.new("TextLabel")
     gemLabel.Size = UDim2.new(1, -14, 1, 0)
     gemLabel.Position = UDim2.fromOffset(7, 0)
     gemLabel.BackgroundTransparency = 1
     gemLabel.Text = "GEMAS  " .. formatNumber(getGemBalance())
-    gemLabel.TextColor3 = Color3.fromRGB(110, 231, 183)
-    gemLabel.Font = Enum.Font.GothamBold
-    gemLabel.TextSize = 11
+    gemLabel.TextColor3 = UI_THEME.text
+    gemLabel.Font = Enum.Font.GothamSemibold
+    gemLabel.TextSize = 12
     gemLabel.TextXAlignment = Enum.TextXAlignment.Center
     gemLabel.Parent = gemPill
 
@@ -2877,47 +2940,47 @@ local function buildNativeUI()
     local centerBtn = Instance.new("TextButton")
     centerBtn.Size = UDim2.fromOffset(30, 30)
     centerBtn.Position = UDim2.new(1, -112, 0.5, -15)
-    centerBtn.BackgroundColor3 = Color3.fromRGB(28, 31, 46)
-    centerBtn.Text = "O"
-    centerBtn.TextColor3 = Color3.fromRGB(165, 180, 252)
+    centerBtn.BackgroundColor3 = UI_THEME.card
+    centerBtn.Text = "◎"
+    centerBtn.TextColor3 = UI_THEME.muted
     centerBtn.Font = Enum.Font.GothamBold
     centerBtn.TextSize = 13
     centerBtn.AutoButtonColor = false
     centerBtn.Parent = titleBar
-    local ccCorner = Instance.new("UICorner") ccCorner.CornerRadius = UDim.new(0, 6) ccCorner.Parent = centerBtn
+    local ccCorner = Instance.new("UICorner") ccCorner.CornerRadius = UDim.new(0, 8) ccCorner.Parent = centerBtn
     centerBtn.MouseButton1Click:Connect(function()
-        mainFrame.Position = UDim2.fromScale(0.5, 0.5)
+        local viewport = getUIViewport()
+        clampWindowPosition(viewport.X * 0.5, viewport.Y * 0.5)
         addLog("info", "Janela recentralizada na tela.")
     end)
 
     -- Minimize Button
-    local isMinimized = false
     local minBtn = Instance.new("TextButton")
     minBtn.Size = UDim2.fromOffset(30, 30)
     minBtn.Position = UDim2.new(1, -76, 0.5, -15)
-    minBtn.BackgroundColor3 = Color3.fromRGB(28, 31, 46)
+    minBtn.BackgroundColor3 = UI_THEME.card
     minBtn.Text = "-"
-    minBtn.TextColor3 = Color3.fromRGB(220, 225, 240)
+    minBtn.TextColor3 = UI_THEME.muted
     minBtn.Font = Enum.Font.GothamBold
     minBtn.TextSize = 15
     minBtn.AutoButtonColor = false
     minBtn.Parent = titleBar
-    local minCorner = Instance.new("UICorner") minCorner.CornerRadius = UDim.new(0, 6) minCorner.Parent = minBtn
+    local minCorner = Instance.new("UICorner") minCorner.CornerRadius = UDim.new(0, 8) minCorner.Parent = minBtn
 
     -- Close Button
     local closeBtn = Instance.new("TextButton")
     closeBtn.Size = UDim2.fromOffset(30, 30)
     closeBtn.Position = UDim2.new(1, -40, 0.5, -15)
-    closeBtn.BackgroundColor3 = Color3.fromRGB(38, 22, 28)
-    closeBtn.Text = "X"
-    closeBtn.TextColor3 = Color3.fromRGB(255, 120, 130)
+    closeBtn.BackgroundColor3 = UI_THEME.card
+    closeBtn.Text = "×"
+    closeBtn.TextColor3 = UI_THEME.muted
     closeBtn.Font = Enum.Font.GothamBold
     closeBtn.TextSize = 13
     closeBtn.AutoButtonColor = false
     closeBtn.Parent = titleBar
-    local closeCorner = Instance.new("UICorner") closeCorner.CornerRadius = UDim.new(0, 6) closeCorner.Parent = closeBtn
+    local closeCorner = Instance.new("UICorner") closeCorner.CornerRadius = UDim.new(0, 8) closeCorner.Parent = closeBtn
     closeBtn.MouseButton1Click:Connect(function()
-        unloadHub()
+        mainFrame.Visible = false
     end)
 
     -- Container for Tabs & Content
@@ -2934,50 +2997,45 @@ local function buildNativeUI()
         if isMinimized then
             tweenGui(mainFrame, {Size = UDim2.fromOffset(WIN_WIDTH, TITLE_HEIGHT)}, 0.2, Enum.EasingStyle.Quart)
             bodyContainer.Visible = false
+            clampWindowPosition()
         else
             bodyContainer.Visible = true
+            clampWindowPosition(nil, nil, true)
             tweenGui(mainFrame, {Size = UDim2.fromOffset(WIN_WIDTH, WIN_HEIGHT)}, 0.2, Enum.EasingStyle.Quart)
         end
     end)
 
     -- Viewport Clamped Window Dragging
     local isDraggingMain = false
-    local dragStartPos, frameStartPos
+    local dragStartPos, frameStartPos, activeTitleTouch
 
     titleBar.InputBegan:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            -- Search and window controls own the right side of the header.
+            if input.Position.X >= mainFrame.AbsolutePosition.X + 492 * windowScale then return end
             isDraggingMain = true
             dragStartPos = input.Position
             frameStartPos = mainFrame.Position
+            activeTitleTouch = input.UserInputType == Enum.UserInputType.Touch and input or nil
         end
     end)
 
     local dragTitleEnd = UserInputService.InputEnded:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input == activeTitleTouch then
             isDraggingMain = false
+            activeTitleTouch = nil
         end
     end)
     trackUIConnection(dragTitleEnd)
 
     local dragTitleMove = UserInputService.InputChanged:Connect(function(input)
-        if isDraggingMain and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+        if isDraggingMain and (input.UserInputType == Enum.UserInputType.MouseMovement or input == activeTitleTouch) then
             local delta = input.Position - dragStartPos
-            local cam = workspace.CurrentCamera
-            local vp = cam and cam.ViewportSize or Vector2.new(1024, 600)
-            local halfW = (WIN_WIDTH * windowScale) / 2
-            local halfH = ((isMinimized and TITLE_HEIGHT or WIN_HEIGHT) * windowScale) / 2
-            
-            local rawCenterX = (vp.X * frameStartPos.X.Scale) + frameStartPos.X.Offset + delta.X
-            local rawCenterY = (vp.Y * frameStartPos.Y.Scale) + frameStartPos.Y.Offset + delta.Y
-            
-            -- Clamp strictly within visible screen margins
-            local clampedCenterX = math.clamp(rawCenterX, halfW + 8, vp.X - halfW - 8)
-            local clampedCenterY = math.clamp(rawCenterY, halfH + 8, vp.Y - halfH - 8)
-            
-            local finalOffsetX = clampedCenterX - (vp.X * 0.5)
-            local finalOffsetY = clampedCenterY - (vp.Y * 0.5)
-            
-            mainFrame.Position = UDim2.new(0.5, finalOffsetX, 0.5, finalOffsetY)
+            local vp = getUIViewport()
+            clampWindowPosition(
+                vp.X * frameStartPos.X.Scale + frameStartPos.X.Offset + delta.X,
+                vp.Y * frameStartPos.Y.Scale + frameStartPos.Y.Offset + delta.Y
+            )
         end
     end)
     trackUIConnection(dragTitleMove)
@@ -2986,7 +3044,8 @@ local function buildNativeUI()
     local sidebar = Instance.new("Frame")
     sidebar.Name = "Sidebar"
     sidebar.Size = UDim2.new(0, SIDEBAR_WIDTH, 1, 0)
-    sidebar.BackgroundColor3 = Color3.fromRGB(15, 16, 24)
+    sidebar.BackgroundColor3 = UI_THEME.sidebar
+    sidebar.BackgroundTransparency = 0.12
     sidebar.BorderSizePixel = 0
     sidebar.ClipsDescendants = false
     sidebar.Parent = bodyContainer
@@ -2996,18 +3055,19 @@ local function buildNativeUI()
     sidebarSep.Name = "SidebarDivider"
     sidebarSep.Size = UDim2.new(0, 1, 1, 0)
     sidebarSep.Position = UDim2.fromOffset(SIDEBAR_WIDTH, 0)
-    sidebarSep.BackgroundColor3 = Color3.fromRGB(32, 35, 48)
+    sidebarSep.BackgroundColor3 = UI_THEME.border
+    sidebarSep.BackgroundTransparency = 0.7
     sidebarSep.BorderSizePixel = 0
     sidebarSep.Parent = bodyContainer
 
     local sidebarLayout = Instance.new("UIListLayout")
-    sidebarLayout.Padding = UDim.new(0, 6)
+    sidebarLayout.Padding = UDim.new(0, 7)
     sidebarLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
     sidebarLayout.SortOrder = Enum.SortOrder.LayoutOrder
     sidebarLayout.Parent = sidebar
 
     local sidebarPadding = Instance.new("UIPadding")
-    sidebarPadding.PaddingTop = UDim.new(0, 12)
+    sidebarPadding.PaddingTop = UDim.new(0, 14)
     sidebarPadding.Parent = sidebar
 
     -- Content Area
@@ -3037,10 +3097,10 @@ local function buildNativeUI()
         for name, btn in pairs(tabButtons) do
             local ind = tabIndicators[name]
             if name == tabName then
-                tweenGui(btn, {BackgroundColor3 = Color3.fromRGB(79, 70, 229), TextColor3 = Color3.fromRGB(255, 255, 255)}, 0.16)
+                tweenGui(btn, {BackgroundColor3 = UI_THEME.accentDark, TextColor3 = UI_THEME.text}, 0.16)
                 if ind then ind.Visible = true end
             else
-                tweenGui(btn, {BackgroundColor3 = Color3.fromRGB(20, 22, 32), TextColor3 = Color3.fromRGB(155, 160, 180)}, 0.16)
+                tweenGui(btn, {BackgroundColor3 = UI_THEME.sidebar, TextColor3 = UI_THEME.muted}, 0.16)
                 if ind then ind.Visible = false end
             end
         end
@@ -3051,53 +3111,39 @@ local function buildNativeUI()
         tabOrderCounter = tabOrderCounter + 1
         local btn = Instance.new("TextButton")
         btn.Name = "TabBtn_" .. tabName
-        btn.Size = UDim2.new(0.9, 0, 0, 40)
-        btn.BackgroundColor3 = Color3.fromRGB(20, 22, 32)
+        btn.Size = UDim2.new(0.9, 0, 0, 42)
+        btn.BackgroundColor3 = UI_THEME.sidebar
         btn.Text = "  " .. tabName
-        btn.TextColor3 = Color3.fromRGB(155, 160, 180)
-        btn.Font = Enum.Font.GothamBold
-        btn.TextSize = 12
+        btn.TextColor3 = UI_THEME.muted
+        btn.Font = Enum.Font.GothamMedium
+        btn.TextSize = 13
         btn.TextXAlignment = Enum.TextXAlignment.Left
         btn.AutoButtonColor = false
         btn.LayoutOrder = tabOrderCounter
         btn.Parent = sidebar
 
         local btnCorner = Instance.new("UICorner")
-        btnCorner.CornerRadius = UDim.new(0, 6)
+        btnCorner.CornerRadius = UDim.new(0, 8)
         btnCorner.Parent = btn
 
         -- Left Active Indicator Pill
         local indicator = Instance.new("Frame")
         indicator.Size = UDim2.new(0, 3, 0.6, 0)
         indicator.Position = UDim2.new(0, 2, 0.2, 0)
-        indicator.BackgroundColor3 = Color3.fromRGB(56, 189, 248)
+        indicator.BackgroundColor3 = UI_THEME.accent
         indicator.BorderSizePixel = 0
         indicator.Visible = false
         indicator.Parent = btn
         local ic = Instance.new("UICorner") ic.CornerRadius = UDim.new(1, 0) ic.Parent = indicator
 
-        -- Optional small badge on right
-        if badgeTag then
-            local b = Instance.new("TextLabel")
-            b.Size = UDim2.fromOffset(40, 16)
-            b.Position = UDim2.new(1, -44, 0.5, -8)
-            b.BackgroundTransparency = 1
-            b.Text = badgeTag
-            b.TextColor3 = Color3.fromRGB(130, 140, 175)
-            b.Font = Enum.Font.GothamMedium
-            b.TextSize = 10
-            b.TextXAlignment = Enum.TextXAlignment.Right
-            b.Parent = btn
-        end
-
         btn.MouseEnter:Connect(function()
             if tabFrames[tabName] and not tabFrames[tabName].Visible then
-                tweenGui(btn, {BackgroundColor3 = Color3.fromRGB(28, 30, 44), TextColor3 = Color3.fromRGB(220, 225, 245)}, 0.15)
+                tweenGui(btn, {BackgroundColor3 = UI_THEME.card, TextColor3 = UI_THEME.text}, 0.15)
             end
         end)
         btn.MouseLeave:Connect(function()
             if tabFrames[tabName] and not tabFrames[tabName].Visible then
-                tweenGui(btn, {BackgroundColor3 = Color3.fromRGB(20, 22, 32), TextColor3 = Color3.fromRGB(155, 160, 180)}, 0.15)
+                tweenGui(btn, {BackgroundColor3 = UI_THEME.sidebar, TextColor3 = UI_THEME.muted}, 0.15)
             end
         end)
 
@@ -3108,13 +3154,13 @@ local function buildNativeUI()
         scroll.BackgroundTransparency = 1
         scroll.BorderSizePixel = 0
         scroll.ScrollBarThickness = 6
-        scroll.ScrollBarImageColor3 = Color3.fromRGB(80, 85, 120)
+        scroll.ScrollBarImageColor3 = UI_THEME.border
         scroll.CanvasPosition = Vector2.new(0, 0)
         scroll.Visible = false
         scroll.Parent = contentArea
 
         local list = Instance.new("UIListLayout")
-        list.Padding = UDim.new(0, 9)
+        list.Padding = UDim.new(0, 10)
         list.HorizontalAlignment = Enum.HorizontalAlignment.Center
         list.SortOrder = Enum.SortOrder.LayoutOrder
         list.Parent = scroll
@@ -3144,18 +3190,19 @@ local function buildNativeUI()
     searchBox.Name = "OptionSearch"
     searchBox.Size = UDim2.fromOffset(176, 30)
     searchBox.Position = UDim2.new(1, -300, 0.5, -15)
-    searchBox.BackgroundColor3 = Color3.fromRGB(14, 16, 24)
+    searchBox.BackgroundColor3 = UI_THEME.shell
+    searchBox.BackgroundTransparency = 0.22
     searchBox.BorderSizePixel = 0
     searchBox.Text = ""
-    searchBox.PlaceholderText = "Buscar nesta aba..."
-    searchBox.TextColor3 = Color3.fromRGB(235, 240, 250)
-    searchBox.PlaceholderColor3 = Color3.fromRGB(120, 128, 150)
+    searchBox.PlaceholderText = "Buscar opções"
+    searchBox.TextColor3 = UI_THEME.text
+    searchBox.PlaceholderColor3 = UI_THEME.muted
     searchBox.Font = Enum.Font.GothamMedium
-    searchBox.TextSize = 11
+    searchBox.TextSize = 12
     searchBox.ClearTextOnFocus = false
     searchBox.Parent = titleBar
-    local searchCorner = Instance.new("UICorner") searchCorner.CornerRadius = UDim.new(0, 7) searchCorner.Parent = searchBox
-    local searchStroke = Instance.new("UIStroke") searchStroke.Color = Color3.fromRGB(45, 49, 68) searchStroke.Thickness = 1 searchStroke.Parent = searchBox
+    local searchCorner = Instance.new("UICorner") searchCorner.CornerRadius = UDim.new(0, 8) searchCorner.Parent = searchBox
+    local searchStroke = Instance.new("UIStroke") searchStroke.Color = UI_THEME.border searchStroke.Transparency = 0.72 searchStroke.Thickness = 1 searchStroke.Parent = searchBox
 
     local function getSearchableText(guiObject)
         local parts = {}
@@ -3182,6 +3229,15 @@ local function buildNativeUI()
     end
     trackUIConnection(searchBox:GetPropertyChangedSignal("Text"):Connect(applyTabFilter))
 
+    local function resolveUIAccent(color)
+        if color and math.abs(color.R - 99 / 255) < 0.01
+            and math.abs(color.G - 102 / 255) < 0.01
+            and math.abs(color.B - 241 / 255) < 0.01 then
+            return UI_THEME.accent
+        end
+        return color or UI_THEME.accent
+    end
+
     -- UI Component: Section Header (Context-Colored)
     local function addNativeSection(parent, title, customAccentColor)
         local frame = Instance.new("Frame")
@@ -3189,7 +3245,7 @@ local function buildNativeUI()
         frame.BackgroundTransparency = 1
         frame.Parent = parent
 
-        local accent = customAccentColor or Color3.fromRGB(99, 102, 241)
+        local accent = resolveUIAccent(customAccentColor)
 
         local bar = Instance.new("Frame")
         bar.Size = UDim2.new(0, 3, 0.7, 0)
@@ -3204,8 +3260,8 @@ local function buildNativeUI()
         lbl.Position = UDim2.fromOffset(12, 0)
         lbl.BackgroundTransparency = 1
         lbl.Text = string.upper(title)
-        lbl.TextColor3 = accent
-        lbl.Font = Enum.Font.GothamBold
+        lbl.TextColor3 = UI_THEME.muted
+        lbl.Font = Enum.Font.GothamSemibold
         lbl.TextSize = 12
         lbl.TextXAlignment = Enum.TextXAlignment.Left
         lbl.Parent = frame
@@ -3213,7 +3269,8 @@ local function buildNativeUI()
         local line = Instance.new("Frame")
         line.Size = UDim2.fromOffset(48, 1)
         line.Position = UDim2.new(1, -52, 0.5, 0)
-        line.BackgroundColor3 = Color3.fromRGB(38, 41, 58)
+        line.BackgroundColor3 = UI_THEME.border
+        line.BackgroundTransparency = 0.7
         line.BorderSizePixel = 0
         line.Parent = frame
     end
@@ -3221,14 +3278,16 @@ local function buildNativeUI()
     -- UI Component: Animated Switch Toggle
     local function addNativeToggle(parent, title, default, callback)
         local frame = Instance.new("Frame")
-        frame.Size = UDim2.new(0.98, 0, 0, 44)
-        frame.BackgroundColor3 = Color3.fromRGB(20, 22, 32)
+        frame.Size = UDim2.new(0.98, 0, 0, 46)
+        frame.BackgroundColor3 = UI_THEME.card
+        frame.BackgroundTransparency = 0.13
         frame.BorderSizePixel = 0
         frame.Parent = parent
 
-        local c = Instance.new("UICorner") c.CornerRadius = UDim.new(0, 6) c.Parent = frame
+        local c = Instance.new("UICorner") c.CornerRadius = UDim.new(0, 9) c.Parent = frame
         local s = Instance.new("UIStroke")
-        s.Color = Color3.fromRGB(36, 40, 58)
+        s.Color = UI_THEME.border
+        s.Transparency = 0.76
         s.Thickness = 1
         s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
         s.Parent = frame
@@ -3238,7 +3297,7 @@ local function buildNativeUI()
         lbl.Position = UDim2.fromOffset(14, 0)
         lbl.BackgroundTransparency = 1
         lbl.Text = title
-        lbl.TextColor3 = Color3.fromRGB(230, 235, 245)
+        lbl.TextColor3 = UI_THEME.text
         lbl.Font = Enum.Font.GothamMedium
         lbl.TextSize = 13
         lbl.TextWrapped = true
@@ -3249,13 +3308,13 @@ local function buildNativeUI()
         local track = Instance.new("TextButton")
         track.Size = UDim2.fromOffset(46, 24)
         track.Position = UDim2.new(1, -58, 0.5, -12)
-        track.BackgroundColor3 = default and Color3.fromRGB(79, 70, 229) or Color3.fromRGB(34, 37, 52)
+        track.BackgroundColor3 = default and UI_THEME.accentDark or UI_THEME.sidebar
         track.Text = ""
         track.AutoButtonColor = false
         track.Parent = frame
 
         local tc = Instance.new("UICorner") tc.CornerRadius = UDim.new(1, 0) tc.Parent = track
-        local ts = Instance.new("UIStroke") ts.Color = Color3.fromRGB(60, 65, 90) ts.Thickness = 1 ts.Parent = track
+        local ts = Instance.new("UIStroke") ts.Color = UI_THEME.border ts.Transparency = 0.55 ts.Thickness = 1 ts.Parent = track
 
         -- Thumb knob
         local thumb = Instance.new("Frame")
@@ -3270,10 +3329,10 @@ local function buildNativeUI()
         local function toggleState()
             state = not state
             if state then
-                tweenGui(track, {BackgroundColor3 = Color3.fromRGB(79, 70, 229)}, 0.18)
+                tweenGui(track, {BackgroundColor3 = UI_THEME.accentDark}, 0.18)
                 tweenGui(thumb, {Position = UDim2.new(1, -21, 0.5, -9)}, 0.18)
             else
-                tweenGui(track, {BackgroundColor3 = Color3.fromRGB(34, 37, 52)}, 0.18)
+                tweenGui(track, {BackgroundColor3 = UI_THEME.sidebar}, 0.18)
                 tweenGui(thumb, {Position = UDim2.new(0, 3, 0.5, -9)}, 0.18)
             end
             callback(state)
@@ -3286,43 +3345,45 @@ local function buildNativeUI()
     -- UI Component: Button (Supports Robux Gold, Gem Green, Primary Indigo)
     local function addNativeButton(parent, title, callback, isPrimary, buttonStyle)
         local btn = Instance.new("TextButton")
-        btn.Size = UDim2.new(0.98, 0, 0, 40)
+        btn.Size = UDim2.new(0.98, 0, 0, 42)
         btn.Text = title
-        btn.Font = Enum.Font.GothamBold
-        btn.TextSize = 12
+        btn.Font = Enum.Font.GothamMedium
+        btn.TextSize = 13
         btn.TextWrapped = true
         btn.AutoButtonColor = false
         btn.Parent = parent
 
-        local c = Instance.new("UICorner") c.CornerRadius = UDim.new(0, 6) c.Parent = btn
+        local c = Instance.new("UICorner") c.CornerRadius = UDim.new(0, 9) c.Parent = btn
         local s = Instance.new("UIStroke")
         s.Thickness = 1
+        s.Transparency = 0.58
         s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
         s.Parent = btn
 
-        local bgCol = Color3.fromRGB(24, 26, 38)
-        local textCol = Color3.fromRGB(225, 230, 245)
-        local strokeCol = Color3.fromRGB(44, 48, 70)
-        local hoverCol = Color3.fromRGB(34, 37, 54)
+        local bgCol = UI_THEME.card
+        local textCol = UI_THEME.text
+        local strokeCol = UI_THEME.border
+        local hoverCol = UI_THEME.cardHover
 
         if buttonStyle == "robux" then
-            bgCol = Color3.fromRGB(44, 32, 14)
-            textCol = Color3.fromRGB(251, 191, 36)
-            strokeCol = Color3.fromRGB(217, 119, 6)
-            hoverCol = Color3.fromRGB(60, 44, 18)
+            bgCol = Color3.fromRGB(59, 47, 35)
+            textCol = Color3.fromRGB(246, 205, 139)
+            strokeCol = Color3.fromRGB(190, 142, 77)
+            hoverCol = Color3.fromRGB(70, 55, 39)
         elseif buttonStyle == "gem" then
-            bgCol = Color3.fromRGB(14, 38, 26)
-            textCol = Color3.fromRGB(52, 211, 153)
-            strokeCol = Color3.fromRGB(16, 185, 129)
-            hoverCol = Color3.fromRGB(20, 54, 36)
+            bgCol = Color3.fromRGB(28, 62, 53)
+            textCol = Color3.fromRGB(155, 228, 186)
+            strokeCol = Color3.fromRGB(89, 179, 129)
+            hoverCol = Color3.fromRGB(36, 76, 63)
         elseif isPrimary then
-            bgCol = Color3.fromRGB(79, 70, 229)
-            textCol = Color3.fromRGB(255, 255, 255)
-            strokeCol = Color3.fromRGB(129, 140, 248)
-            hoverCol = Color3.fromRGB(99, 102, 241)
+            bgCol = UI_THEME.accentDark
+            textCol = UI_THEME.text
+            strokeCol = UI_THEME.accent
+            hoverCol = Color3.fromRGB(49, 96, 92)
         end
 
         btn.BackgroundColor3 = bgCol
+        btn.BackgroundTransparency = 0.1
         btn.TextColor3 = textCol
         s.Color = strokeCol
 
@@ -3333,9 +3394,9 @@ local function buildNativeUI()
             tweenGui(btn, {BackgroundColor3 = bgCol}, 0.15)
         end)
         btn.MouseButton1Click:Connect(function()
-            tweenGui(btn, {Size = UDim2.new(0.96, 0, 0, 38)}, 0.08, Enum.EasingStyle.Sine, Enum.EasingDirection.Out)
+            tweenGui(btn, {BackgroundColor3 = hoverCol}, 0.08, Enum.EasingStyle.Sine, Enum.EasingDirection.Out)
             task.wait(0.08)
-            tweenGui(btn, {Size = UDim2.new(0.98, 0, 0, 40)}, 0.08, Enum.EasingStyle.Sine, Enum.EasingDirection.Out)
+            tweenGui(btn, {BackgroundColor3 = bgCol}, 0.08, Enum.EasingStyle.Sine, Enum.EasingDirection.Out)
             callback()
         end)
         return btn
@@ -3344,14 +3405,16 @@ local function buildNativeUI()
     -- UI Component: Interactive Slider
     local function addNativeSlider(parent, title, min, max, default, callback)
         local frame = Instance.new("Frame")
-        frame.Size = UDim2.new(0.98, 0, 0, 54)
-        frame.BackgroundColor3 = Color3.fromRGB(20, 22, 32)
+        frame.Size = UDim2.new(0.98, 0, 0, 58)
+        frame.BackgroundColor3 = UI_THEME.card
+        frame.BackgroundTransparency = 0.13
         frame.BorderSizePixel = 0
         frame.Parent = parent
 
-        local c = Instance.new("UICorner") c.CornerRadius = UDim.new(0, 6) c.Parent = frame
+        local c = Instance.new("UICorner") c.CornerRadius = UDim.new(0, 9) c.Parent = frame
         local s = Instance.new("UIStroke")
-        s.Color = Color3.fromRGB(36, 40, 58)
+        s.Color = UI_THEME.border
+        s.Transparency = 0.76
         s.Thickness = 1
         s.Parent = frame
 
@@ -3360,9 +3423,9 @@ local function buildNativeUI()
         tLbl.Position = UDim2.fromOffset(14, 5)
         tLbl.BackgroundTransparency = 1
         tLbl.Text = title
-        tLbl.TextColor3 = Color3.fromRGB(220, 225, 240)
+        tLbl.TextColor3 = UI_THEME.text
         tLbl.Font = Enum.Font.GothamMedium
-        tLbl.TextSize = 12
+        tLbl.TextSize = 13
         tLbl.TextXAlignment = Enum.TextXAlignment.Left
         tLbl.Parent = frame
 
@@ -3371,7 +3434,7 @@ local function buildNativeUI()
         valLbl.Position = UDim2.new(1, -66, 0, 5)
         valLbl.BackgroundTransparency = 1
         valLbl.Text = tostring(default)
-        valLbl.TextColor3 = Color3.fromRGB(129, 140, 248)
+        valLbl.TextColor3 = UI_THEME.accent
         valLbl.Font = Enum.Font.GothamBold
         valLbl.TextSize = 12
         valLbl.TextXAlignment = Enum.TextXAlignment.Right
@@ -3380,7 +3443,7 @@ local function buildNativeUI()
         local barBg = Instance.new("TextButton")
         barBg.Size = UDim2.new(1, -24, 0, 8)
         barBg.Position = UDim2.fromOffset(12, 37)
-        barBg.BackgroundColor3 = Color3.fromRGB(32, 35, 50)
+        barBg.BackgroundColor3 = UI_THEME.sidebar
         barBg.Text = ""
         barBg.AutoButtonColor = false
         barBg.Parent = frame
@@ -3389,7 +3452,7 @@ local function buildNativeUI()
         local fill = Instance.new("Frame")
         local startFrac = math.clamp((default - min) / (max - min), 0, 1)
         fill.Size = UDim2.fromScale(startFrac, 1)
-        fill.BackgroundColor3 = Color3.fromRGB(79, 70, 229)
+        fill.BackgroundColor3 = UI_THEME.accent
         fill.BorderSizePixel = 0
         fill.Parent = barBg
         local fc = Instance.new("UICorner") fc.CornerRadius = UDim.new(1, 0) fc.Parent = fill
@@ -3424,16 +3487,18 @@ local function buildNativeUI()
     -- UI Component: Modern Info / Status Card (Context-Colored)
     local function addNativeParagraph(parent, title, content, customAccentColor)
         local frame = Instance.new("Frame")
-        frame.Size = UDim2.new(0.98, 0, 0, 68)
-        frame.BackgroundColor3 = Color3.fromRGB(20, 22, 32)
+        frame.Size = UDim2.new(0.98, 0, 0, 72)
+        frame.BackgroundColor3 = UI_THEME.card
+        frame.BackgroundTransparency = 0.12
         frame.BorderSizePixel = 0
         frame.Parent = parent
 
-        local accentCol = customAccentColor or Color3.fromRGB(99, 102, 241)
+        local accentCol = resolveUIAccent(customAccentColor)
 
-        local c = Instance.new("UICorner") c.CornerRadius = UDim.new(0, 6) c.Parent = frame
+        local c = Instance.new("UICorner") c.CornerRadius = UDim.new(0, 9) c.Parent = frame
         local s = Instance.new("UIStroke")
-        s.Color = customAccentColor and Color3.fromRGB(math.floor(accentCol.R * 120), math.floor(accentCol.G * 120), math.floor(accentCol.B * 120)) or Color3.fromRGB(36, 40, 58)
+        s.Color = UI_THEME.border
+        s.Transparency = 0.72
         s.Thickness = 1
         s.Parent = frame
 
@@ -3452,16 +3517,16 @@ local function buildNativeUI()
         tLbl.Text = title
         tLbl.TextColor3 = accentCol
         tLbl.Font = Enum.Font.GothamBold
-        tLbl.TextSize = 12
+        tLbl.TextSize = 13
         tLbl.TextXAlignment = Enum.TextXAlignment.Left
         tLbl.Parent = frame
 
         local cLbl = Instance.new("TextLabel")
-        cLbl.Size = UDim2.new(1, -30, 0, 32)
+        cLbl.Size = UDim2.new(1, -30, 0, 36)
         cLbl.Position = UDim2.fromOffset(15, 31)
         cLbl.BackgroundTransparency = 1
         cLbl.Text = content
-        cLbl.TextColor3 = Color3.fromRGB(205, 210, 225)
+        cLbl.TextColor3 = UI_THEME.muted
         cLbl.Font = Enum.Font.Gotham
         cLbl.TextSize = 12
         cLbl.TextWrapped = true
@@ -3912,8 +3977,9 @@ local function buildNativeUI()
         addNativeSection(consoleTab, "Registro de atividade")
         local consoleBox = Instance.new("TextBox")
         consoleBox.Size = UDim2.new(0.98, 0, 0, 280)
-        consoleBox.BackgroundColor3 = Color3.fromRGB(12, 13, 19)
-        consoleBox.TextColor3 = Color3.fromRGB(165, 243, 180)
+        consoleBox.BackgroundColor3 = UI_THEME.sidebar
+        consoleBox.BackgroundTransparency = 0.08
+        consoleBox.TextColor3 = UI_THEME.text
         consoleBox.Font = Enum.Font.Code
         consoleBox.TextSize = 12
         consoleBox.ClearTextOnFocus = false
@@ -3924,8 +3990,8 @@ local function buildNativeUI()
         consoleBox.Active = false
         consoleBox.Text = table.concat(LogEntries, "\n")
         consoleBox.Parent = consoleTab
-        local cbCorner = Instance.new("UICorner") cbCorner.CornerRadius = UDim.new(0, 6) cbCorner.Parent = consoleBox
-        local cbStroke = Instance.new("UIStroke") cbStroke.Color = Color3.fromRGB(36, 40, 58) cbStroke.Thickness = 1 cbStroke.Parent = consoleBox
+        local cbCorner = Instance.new("UICorner") cbCorner.CornerRadius = UDim.new(0, 9) cbCorner.Parent = consoleBox
+        local cbStroke = Instance.new("UIStroke") cbStroke.Color = UI_THEME.border cbStroke.Transparency = 0.7 cbStroke.Thickness = 1 cbStroke.Parent = consoleBox
 
         local consoleRefreshThread = task.spawn(function()
             while IsHubLoaded and consoleBox and consoleBox.Parent do
@@ -3994,12 +4060,8 @@ local function buildNativeUI()
     createFloatingToggleButton(function()
         mainFrame.Visible = not mainFrame.Visible
         if mainFrame.Visible then
-            local cam = workspace.CurrentCamera
-            local vp = cam and cam.ViewportSize or Vector2.new(1024, 600)
-            if mainFrame.AbsolutePosition.Y < 10 or mainFrame.AbsolutePosition.Y > vp.Y - 40 or
-               mainFrame.AbsolutePosition.X < 10 or mainFrame.AbsolutePosition.X > vp.X - 50 then
-                mainFrame.Position = UDim2.fromScale(0.5, 0.5)
-            end
+            updateResponsiveScale()
+            clampWindowPosition()
         end
     end)
 end
