@@ -1,7 +1,7 @@
 {
-  "version": "6.7",
-  "versionNumber": 67,
+  "version": "6.8",
+  "versionNumber": 68,
   "gameCompatibility": "Lobby/Farmhouse v1068; Basement PlaceVersion 510 (dump 2026-09-13)",
   "releaseDate": "2026-09-14",
-  "releaseNotes": "Restores the installed version in the header and a live GitHub version card in Settings. Version checks now bypass stale cache and report results or errors visibly; script reload validates the download before replacing the running hub."
+  "releaseNotes": "Shows installed and GitHub versions with visible check results, reads the current Git commit to avoid stale version.json responses, and checks downloaded script version before reload."
 }

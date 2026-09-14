@@ -1,5 +1,5 @@
 --[[
-    SEARCH FOR THE NEEDLE - ULTIMATE AUTOMATION HUB v6.7 PRO
+    SEARCH FOR THE NEEDLE - ULTIMATE AUTOMATION HUB v6.8 PRO
     Forensically Engineered from Luau Decompiler Bytecode Dump
     - Exact Multi-Grab Batching using LocalPlayer:GetAttribute("HayGrabCount") & getGrabCandidates
     - Rainbow / RGB Straw Priority via Neon, Material, and Config.isRainbow(hayId)
@@ -130,7 +130,7 @@ else
     GAME_MODE_NAME = "Place " .. tostring(CURRENT_PLACE_ID)
 end
 local CURRENT_PLACE_NAME = GAME_MODE_NAME
-local SCRIPT_VERSION = "6.7"
+local SCRIPT_VERSION = "6.8"
 local CurrentContextMode = IS_LOBBY and "Lobby" or "Match"
 
 -- Require game Config if available for exact mathematical rainbow calculations
@@ -2675,9 +2675,32 @@ end
 
 -- Version & GitHub Update Status Store
 local RemoteScriptVersion = nil
+local RemoteGitCommitSha = nil
 local ScriptUpdateAvailable = false
 local ScriptUpdateNotice = "Aguardando consulta ao GitHub"
 local ScriptUpdateRequestId = 0
+local GitHubRawRoot = "https://raw.githubusercontent.com/victorcxzk/search-for-the-needle-script/"
+
+local function versionCacheKey()
+    return tostring(os.time()) .. "-" .. tostring(math.floor(os.clock() * 1000))
+end
+
+local function readGitHubHeadSha()
+    local requestOk, response = pcall(function()
+        return game:HttpGet("https://api.github.com/repos/victorcxzk/search-for-the-needle-script/branches/master?cb=" .. versionCacheKey())
+    end)
+    if not requestOk or type(response) ~= "string" then return nil end
+    local HttpService = safeService("HttpService")
+    local parsed = nil
+    pcall(function()
+        if HttpService then parsed = HttpService:JSONDecode(response) end
+    end)
+    local sha = type(parsed) == "table" and type(parsed.commit) == "table" and parsed.commit.sha or nil
+    if type(sha) == "string" and #sha == 40 and sha:match("^[%da-fA-F]+$") then
+        return sha
+    end
+    return nil
+end
 
 local function compareHubVersions(remote, installed)
     local remoteParts, installedParts = {}, {}
@@ -2698,9 +2721,9 @@ local function checkForScriptUpdates(onFinished)
     local requestId = ScriptUpdateRequestId
     ScriptUpdateNotice = "Consultando GitHub..."
     task.spawn(function()
+        local commitSha = readGitHubHeadSha()
         local success, res = pcall(function()
-            local cacheKey = tostring(os.time()) .. "-" .. tostring(math.floor(os.clock() * 1000))
-            return game:HttpGet("https://raw.githubusercontent.com/victorcxzk/search-for-the-needle-script/master/version.json?cb=" .. cacheKey)
+            return game:HttpGet(GitHubRawRoot .. (commitSha or "master") .. "/version.json?cb=" .. versionCacheKey())
         end)
         local remoteVersion = nil
         local notice = nil
@@ -2731,6 +2754,7 @@ local function checkForScriptUpdates(onFinished)
             notice = "Falha ao consultar GitHub"
         end
         if requestId ~= ScriptUpdateRequestId then return end
+        RemoteGitCommitSha = commitSha
         RemoteScriptVersion = remoteVersion
         ScriptUpdateAvailable = available
         ScriptUpdateNotice = notice
@@ -4048,11 +4072,18 @@ local function buildNativeUI()
 
         addNativeButton(setTab, "Atualizar / Recarregar Script (Auto-Download)", function()
             versionCard.Text = "Instalada: v" .. SCRIPT_VERSION .. "\nBaixando script do GitHub..."
+            local commitSha = readGitHubHeadSha() or RemoteGitCommitSha
             local downloadOk, source = pcall(function()
-                return game:HttpGet("https://raw.githubusercontent.com/victorcxzk/search-for-the-needle-script/master/main.lua?cb=" .. tostring(os.time()))
+                return game:HttpGet(GitHubRawRoot .. (commitSha or "master") .. "/main.lua?cb=" .. versionCacheKey())
             end)
             if not downloadOk or type(source) ~= "string" or #source == 0 then
                 versionCard.Text = "Instalada: v" .. SCRIPT_VERSION .. "\nFalha ao baixar. Tente novamente."
+                return
+            end
+            local downloadedVersion = source:match('local%s+SCRIPT_VERSION%s*=%s*"([^"]+)"')
+            local comparison = downloadedVersion and compareHubVersions(downloadedVersion, SCRIPT_VERSION) or nil
+            if comparison == nil or comparison < 0 then
+                versionCard.Text = "Instalada: v" .. SCRIPT_VERSION .. "\nArquivo remoto invalido ou mais antigo."
                 return
             end
             local loader, compileError = loadstring(source)
