@@ -1,5 +1,5 @@
 --[[
-    SEARCH FOR THE NEEDLE - ULTIMATE AUTOMATION HUB v6.12 PRO
+    SEARCH FOR THE NEEDLE - ULTIMATE AUTOMATION HUB v6.13 PRO
     Forensically Engineered from Luau Decompiler Bytecode Dump
     - Exact Multi-Grab Batching using LocalPlayer:GetAttribute("HayGrabCount") & getGrabCandidates
     - Rare / RGB priority via HayMutation and the game's value multipliers
@@ -130,7 +130,7 @@ else
     GAME_MODE_NAME = "Place " .. tostring(CURRENT_PLACE_ID)
 end
 local CURRENT_PLACE_NAME = GAME_MODE_NAME
-local SCRIPT_VERSION = "6.12"
+local SCRIPT_VERSION = "6.13"
 local CurrentContextMode = IS_LOBBY and "Lobby" or "Match"
 
 -- Require game Config if available for exact mathematical rainbow calculations
@@ -1537,7 +1537,7 @@ local farmThread = task.spawn(function()
         local basementExitReady = IS_BASEMENT and HubState.AutoWinNeedle
             and LocalPlayer:GetAttribute("NeedleOwned") == true
             and BasementPuzzlesFolder and BasementPuzzlesFolder:GetAttribute("EscapeReady") == true
-        if HubState.AutoFarmHay and IS_GAMEPLAY and not isCurrentlySelling
+        if (HubState.AutoFarmHay or HubState.AutoSell) and IS_GAMEPLAY and not isCurrentlySelling
             and not TntComboInProgress and not basementExitReady then
             local hrp = getHRP()
             local char = getCharacter()
@@ -1588,7 +1588,7 @@ local farmThread = task.spawn(function()
                         task.wait(0.12)
                         isCurrentlySelling = false
                     end
-                else
+                elseif HubState.AutoFarmHay then
                     -- 1. Intelligent Tool Recognition & Auto-Equip
                     local activeSlot = getCurrentEquippedSlot()
                     if HubState.AutoEquipBestTool then
@@ -2168,15 +2168,16 @@ local autoBuyThread = task.spawn(function()
         task.wait(1.5)
         if IS_GAMEPLAY then
             -- Buy a single progression item per cycle. This prevents prompt/event spam.
+            local purchaseSent = false
             if HubState.AutoBuyTools then
                 for _, toolName in ipairs(barnToolNames) do
                     if not isToolOwned(toolName) then
                         local sent = requestBarnToolPurchase(toolName, false)
-                        if sent then break end
+                        if sent then purchaseSent = true; break end
                     end
                 end
             end
-            if HubState.AutoBuyUpgrades then
+            if HubState.AutoBuyUpgrades and not purchaseSent then
                 for _, track in ipairs(upgradeTracks) do
                     local state = getUpgradeState(track)
                     if state and state.available and state.cost and getCashBalance() >= state.cost then
@@ -3366,22 +3367,20 @@ local function buildNativeUI()
         thumb.Parent = track
         local thumbC = Instance.new("UICorner") thumbC.CornerRadius = UDim.new(1, 0) thumbC.Parent = thumb
 
-        frame:SetAttribute("HubToggleState", default == true)
-        local function renderToggleState()
-            if frame:GetAttribute("HubToggleState") == true then
+        local state = default
+        local function toggleState()
+            state = not state
+            if state then
                 tweenGui(track, {BackgroundColor3 = UI_THEME.accentDark}, 0.18)
                 tweenGui(thumb, {Position = UDim2.new(1, -21, 0.5, -9)}, 0.18)
             else
                 tweenGui(track, {BackgroundColor3 = UI_THEME.sidebar}, 0.18)
                 tweenGui(thumb, {Position = UDim2.new(0, 3, 0.5, -9)}, 0.18)
             end
+            callback(state)
         end
-        frame:GetAttributeChangedSignal("HubToggleState"):Connect(renderToggleState)
-        track.MouseButton1Click:Connect(function()
-            local newValue = frame:GetAttribute("HubToggleState") ~= true
-            frame:SetAttribute("HubToggleState", newValue)
-            callback(newValue)
-        end)
+
+        track.MouseButton1Click:Connect(toggleState)
         return frame
     end
 
@@ -3663,41 +3662,16 @@ local function buildNativeUI()
         local consoleTab = createTab("Atividade", "LOGS")
         local setTab = createTab("Ajustes", "CFG")
 
-        -- 1. One-action routine, with only the most useful individual controls.
-        local routineFrames = {}
-        local routineMaster = nil
-        local function routineIsComplete()
-            return HubState.AutoFarmHay and HubState.AutoSell and HubState.AutoBuyTools
-                and HubState.AutoBuyUpgrades and HubState.AutoEquipBestTool
-                and HubState.AutoUseTnt and HubState.AutoCollectGems
-                and HubState.AutoDeployDrone and HubState.AutoWinNeedle
-                and HubState.PrioritizeRGB
-        end
-        local function syncRoutineControls()
-            for key, frame in pairs(routineFrames) do
-                if frame and frame.Parent then
-                    local active = key == "AutoBuy" and HubState.AutoBuyTools and HubState.AutoBuyUpgrades
-                        or HubState[key] == true
-                    frame:SetAttribute("HubToggleState", active == true)
-                end
-            end
-            if routineMaster and routineMaster.Parent then
-                routineMaster:SetAttribute("HubToggleState", routineIsComplete() == true)
-            end
-        end
-
-        addNativeSection(farmTab, "Rotina automatica", Color3.fromRGB(99, 102, 241))
-        routineMaster = addNativeToggle(farmTab, "Automacao completa: farm + venda + compras", false, function(enabled)
-            HubState.AutoFarmHay = enabled
-            HubState.AutoSell = enabled
-            HubState.AutoBuyTools = enabled
-            HubState.AutoBuyUpgrades = enabled
-            HubState.AutoEquipBestTool = enabled
-            HubState.AutoUseTnt = enabled
-            HubState.AutoCollectGems = enabled
-            HubState.AutoDeployDrone = enabled
-            HubState.AutoWinNeedle = enabled
-            if enabled then
+        -- 1. Each named automation owns its related actions, without a global
+        -- master switch that silently changes unrelated features.
+        addNativeSection(farmTab, "Automation", Color3.fromRGB(99, 102, 241))
+        addNativeToggle(farmTab, "Auto Farm", HubState.AutoFarmHay, function(val)
+            HubState.AutoFarmHay = val
+            HubState.AutoEquipBestTool = val
+            HubState.AutoUseTnt = val
+            HubState.AutoCollectGems = val
+            HubState.AutoDeployDrone = val
+            if val then
                 HubState.PrioritizeRGB = true
                 HubState.ForcedToolSlot = 0
                 local bestSlot = getBestAvailableToolSlot()
@@ -3705,59 +3679,24 @@ local function buildNativeUI()
             else
                 stopVacuumAutomation()
             end
-            syncRoutineControls()
-            addLog("info", enabled and "Rotina completa ligada." or "Rotina completa desligada.")
+            addLog("info", val and "Auto Farm ligado: raros, melhor ferramenta, TNT, gemas e drone."
+                or "Auto Farm desligado.")
         end)
-        addNativeParagraph(farmTab, "Um controle", "Liga farm, ferramenta, TNT, gemas, drone, venda e compras. Puzzles do Porao seguem manuais.", Color3.fromRGB(99, 102, 241))
-        local routineStatus = addNativeParagraph(farmTab, "Estado atual", "Aguardando...", Color3.fromRGB(99, 102, 241))
-        task.spawn(function()
-            while IsHubLoaded and routineStatus and routineStatus.Parent do
-                routineStatus.Text = string.format("Farm %s | Compra %s | Venda %s | %s",
-                    HubState.AutoFarmHay and "ON" or "OFF",
-                    (HubState.AutoBuyTools or HubState.AutoBuyUpgrades) and "ON" or "OFF",
-                    HubState.AutoSell and "ON" or "OFF",
-                    HubState.NoTeleportMode and "sem TP" or "TP automatico")
-                task.wait(1)
-            end
-        end)
-
-        addNativeSection(farmTab, "Ajustes rapidos", Color3.fromRGB(99, 102, 241))
-        routineFrames.AutoFarmHay = addNativeToggle(farmTab, "Auto farm", HubState.AutoFarmHay, function(val)
-            HubState.AutoFarmHay = val
-            if not val then stopVacuumAutomation() end
-            syncRoutineControls()
-        end)
-        addNativeToggle(farmTab, "Ficar livre, sem teleporte", HubState.NoTeleportMode, function(val)
-            HubState.NoTeleportMode = val
-            addLog("info", val and "Teleporte automatico desligado." or "Teleporte automatico permitido.")
-        end)
-        addNativeParagraph(farmTab, "Prioridade real", "Raros por valor, em qualquer altura; comuns nas bordas. Sem TP, vale o alcance da ferramenta.", Color3.fromRGB(99, 102, 241))
-        routineFrames.PrioritizeRGB = addNativeToggle(farmTab, "Priorizar feno raro / RGB", HubState.PrioritizeRGB, function(val)
-            HubState.PrioritizeRGB = val
-            syncRoutineControls()
-        end)
-        routineFrames.AutoBuy = addNativeToggle(farmTab, "Auto comprar ferramentas e melhorias", false, function(val)
+        addNativeToggle(farmTab, "Auto Buy", HubState.AutoBuyTools and HubState.AutoBuyUpgrades, function(val)
             HubState.AutoBuyTools = val
             HubState.AutoBuyUpgrades = val
-            syncRoutineControls()
+            addLog("info", val and "Auto Buy ligado: ferramentas e melhorias por moedas da partida."
+                or "Auto Buy desligado.")
         end)
-        routineFrames.AutoSell = addNativeToggle(farmTab, "Auto vender quando encher", HubState.AutoSell, function(val)
+        addNativeToggle(farmTab, "Auto Sell", HubState.AutoSell, function(val)
             HubState.AutoSell = val
-            syncRoutineControls()
+            addLog("info", val and "Auto Sell ligado." or "Auto Sell desligado.")
         end)
-        routineFrames.AutoUseTnt = addNativeToggle(farmTab, "TNT automatico", HubState.AutoUseTnt, function(val)
-            HubState.AutoUseTnt = val
-            syncRoutineControls()
-        end)
-        routineFrames.AutoWinNeedle = addNativeToggle(farmTab,
-            IS_BASEMENT and "Auto coletar chave / abrir saida" or "Auto coletar / entregar Agulha",
+        addNativeToggle(farmTab, "Auto Objective (Needle/Key)",
             HubState.AutoWinNeedle, function(val)
                 HubState.AutoWinNeedle = val
-                syncRoutineControls()
+                addLog("info", val and "Auto Objective ligado." or "Auto Objective desligado.")
             end)
-        addNativeSlider(farmTab, "Espera extra do TNT (0 = cooldown)", 0, 60, HubState.TntInterval, function(val)
-            HubState.TntInterval = val
-        end)
 
         addNativeSection(farmTab, "Ferramentas detectadas", Color3.fromRGB(99, 102, 241))
         local toolStatusLbl = addNativeParagraph(farmTab, "Status das ferramentas", getToolStatusSummary(), Color3.fromRGB(99, 102, 241))
