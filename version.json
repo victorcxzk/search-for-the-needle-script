@@ -1,7 +1,7 @@
 {
-  "version": "6.9",
-  "versionNumber": 69,
+  "version": "6.10",
+  "versionNumber": 70,
   "gameCompatibility": "Lobby/Farmhouse v1068; Basement PlaceVersion 510 (dump 2026-09-13)",
   "releaseDate": "2026-09-14",
-  "releaseNotes": "Makes the installed version clickable, opens Settings and refreshes GitHub status, resolves the current Git commit to avoid stale version metadata, and validates downloads before reload."
+  "releaseNotes": "Keeps the circular menu button visible at all times and adds RightShift to open or close the menu without affecting minimize behavior."
 }

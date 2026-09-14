@@ -1,5 +1,5 @@
 --[[
-    SEARCH FOR THE NEEDLE - ULTIMATE AUTOMATION HUB v6.9 PRO
+    SEARCH FOR THE NEEDLE - ULTIMATE AUTOMATION HUB v6.10 PRO
     Forensically Engineered from Luau Decompiler Bytecode Dump
     - Exact Multi-Grab Batching using LocalPlayer:GetAttribute("HayGrabCount") & getGrabCandidates
     - Rainbow / RGB Straw Priority via Neon, Material, and Config.isRainbow(hayId)
@@ -130,7 +130,7 @@ else
     GAME_MODE_NAME = "Place " .. tostring(CURRENT_PLACE_ID)
 end
 local CURRENT_PLACE_NAME = GAME_MODE_NAME
-local SCRIPT_VERSION = "6.9"
+local SCRIPT_VERSION = "6.10"
 local CurrentContextMode = IS_LOBBY and "Lobby" or "Match"
 
 -- Require game Config if available for exact mathematical rainbow calculations
@@ -2538,6 +2538,7 @@ local UI_THEME = {
     accent = Color3.fromRGB(101, 213, 198),
     accentDark = Color3.fromRGB(38, 78, 77),
 }
+local MENU_TOGGLE_KEY = Enum.KeyCode.RightShift
 
 local function getUIViewport()
     local camera = workspace.CurrentCamera
@@ -2566,6 +2567,7 @@ local function createFloatingToggleButton(toggleCallback)
     floatGui.ResetOnSpawn = false
     floatGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
     floatGui.IgnoreGuiInset = true
+    floatGui.DisplayOrder = 10
     pcall(function() floatGui.Parent = CoreGui end)
     if not floatGui.Parent then floatGui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
     FloatingButtonGui = floatGui
@@ -2591,7 +2593,7 @@ local function createFloatingToggleButton(toggleCallback)
     stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
     stroke.Parent = floatBtn
 
-    -- Circular launcher, shown only after the main window is closed.
+    -- Circular launcher stays available in every window state.
     local lbl = Instance.new("TextLabel")
     lbl.Size = UDim2.fromScale(1, 1)
     lbl.BackgroundTransparency = 1
@@ -2781,6 +2783,7 @@ local function buildNativeUI()
     screenGui.ResetOnSpawn = false
     screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
     screenGui.IgnoreGuiInset = true
+    screenGui.DisplayOrder = 5
     pcall(function() screenGui.Parent = CoreGui end)
     if not screenGui.Parent then screenGui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
     GlobalScreenGui = screenGui
@@ -3026,10 +3029,23 @@ local function buildNativeUI()
         setWindowMinimized(not isMinimized)
     end)
 
-    -- Close hides the window. The circular launcher is the only way to reopen it.
+    local function setMenuVisible(visible)
+        if visible then
+            mainFrame.Visible = true
+            updateResponsiveScale()
+            if isMinimized then
+                setWindowMinimized(false)
+            else
+                clampWindowPosition()
+            end
+        else
+            mainFrame.Visible = false
+        end
+    end
+
+    -- Minimize keeps the title bar; close hides the window entirely.
     closeBtn.MouseButton1Click:Connect(function()
-        mainFrame.Visible = false
-        if FloatingButtonGui then FloatingButtonGui.Enabled = true end
+        setMenuVisible(false)
     end)
 
     -- Viewport Clamped Window Dragging
@@ -4110,20 +4126,23 @@ local function buildNativeUI()
             end
         end, true)
 
+        addNativeParagraph(setTab, "Atalho do menu",
+            "RightShift abre ou fecha o menu. A bolinha permanece visivel para usar com o mouse.")
+
         addNativeSection(setTab, "Sessao")
         addNativeButton(setTab, "Fechar e descarregar o hub", function()
             unloadHub()
         end, true)
     end
 
-    local floatingToggleGui = createFloatingToggleButton(function()
-        mainFrame.Visible = true
-        updateResponsiveScale()
-        clampWindowPosition()
-        if FloatingButtonGui then FloatingButtonGui.Enabled = false end
+    createFloatingToggleButton(function()
+        setMenuVisible(not mainFrame.Visible)
     end)
-    -- Do not duplicate controls while the menu itself is open or minimized.
-    floatingToggleGui.Enabled = false
+    trackUIConnection(UserInputService.InputBegan:Connect(function(input)
+        if input.KeyCode ~= MENU_TOGGLE_KEY then return end
+        if UserInputService:GetFocusedTextBox() then return end
+        setMenuVisible(not mainFrame.Visible)
+    end))
 end
 
 -- Background Watcher: Game PlaceVersion Update Detection
