@@ -1,8 +1,8 @@
 --[[
-    SEARCH FOR THE NEEDLE - ULTIMATE AUTOMATION HUB v6.11 PRO
+    SEARCH FOR THE NEEDLE - ULTIMATE AUTOMATION HUB v6.12 PRO
     Forensically Engineered from Luau Decompiler Bytecode Dump
     - Exact Multi-Grab Batching using LocalPlayer:GetAttribute("HayGrabCount") & getGrabCandidates
-    - Rainbow / RGB Straw Priority via Neon, Material, and Config.isRainbow(hayId)
+    - Rare / RGB priority via HayMutation and the game's value multipliers
     - Auto Collect Gems via workspace.GemsClient & CollectGem(GemId)
     - Auto-Win Needle via PickHay("Objective"), slot equip, and Farmer hand-in
     - Full Autonomous Sell-Cycle at CollectionService:GetTagged("SellPart")
@@ -130,7 +130,7 @@ else
     GAME_MODE_NAME = "Place " .. tostring(CURRENT_PLACE_ID)
 end
 local CURRENT_PLACE_NAME = GAME_MODE_NAME
-local SCRIPT_VERSION = "6.11"
+local SCRIPT_VERSION = "6.12"
 local CurrentContextMode = IS_LOBBY and "Lobby" or "Match"
 
 -- Require game Config if available for exact mathematical rainbow calculations
@@ -587,14 +587,14 @@ local HubState = {
     AutoFarmHay = false,
     PrioritizeRGB = true,
     BatchMultiGrab = true,
-    AutoSell = true,
-    AutoCollectGems = true,
-    AutoWinNeedle = true,
-    AutoDeployDrone = true,
+    AutoSell = false,
+    AutoCollectGems = false,
+    AutoWinNeedle = false,
+    AutoDeployDrone = false,
     AutoBuyTools = false,
     AutoBuyUpgrades = false,
-    AutoEquipBestTool = true,
-    AutoUseTnt = true,
+    AutoEquipBestTool = false,
+    AutoUseTnt = false,
     TntInterval = 0,
     ForcedToolSlot = 0,
     FarmCooldown = 0.35,
@@ -1002,39 +1002,40 @@ local function forceSnap3rdPerson(distance)
     end)
 end
 
--- Exact Rainbow / RGB Detector
-local function isRainbowStrand(part)
-    if not part or not part:IsA("BasePart") then return false end
-
-    -- Check direct Rainbow / Mutation attributes (v1068 Hay Index updates)
-    if part:GetAttribute("Rainbow") == true then return true end
-    local mutation = part:GetAttribute("Mutation") or part:GetAttribute("HayType")
-    if mutation and type(mutation) == "string" then
-        local mLower = mutation:lower()
-        if mLower:find("void") or mLower:find("rainbow") or mLower:find("electric") or mLower:find("gold") or mLower:find("glass") or mLower:find("burnt") then
-            return true
+-- The game writes the authoritative mutation to HayMutation when it creates
+-- each strand. Visual color/material alone can also describe ordinary hay.
+local MutationMultipliers = {
+    Void = 20, Rainbow = 10, Electric = 8, Gold = 6, Burnt = 4,
+    Glass = 3, Muddy = 2, Grassy = 1.5, Damp = 1.25,
+}
+if HaystackConfig and type(HaystackConfig.HAY_MUTATIONS) == "table" then
+    for _, definition in pairs(HaystackConfig.HAY_MUTATIONS) do
+        if type(definition) == "table" and type(definition.Name) == "string" then
+            MutationMultipliers[definition.Name] = tonumber(definition.ValueMultiplier) or 1
         end
     end
+end
 
-    -- Check Neon material (Special straw mutations in NeedleHaystackClient are Neon / ForceField)
-    if part.Material == Enum.Material.Neon or part.Material == Enum.Material.ForceField then
-        return true
+local function getRareHayMultiplier(part)
+    if not part or not part:IsA("BasePart") then return 1 end
+    local mutation = part:GetAttribute("HayMutation")
+        or part:GetAttribute("Mutation") or part:GetAttribute("HayType")
+    if type(mutation) == "string" then
+        return MutationMultipliers[mutation] or 1
     end
-
-    -- Mathematical check via Config.isRainbow(hayId)
+    if part:GetAttribute("Rainbow") == true then return MutationMultipliers.Rainbow end
     local hayId = part:GetAttribute("HayId")
-    if hayId and HaystackConfig and HaystackConfig.isRainbow then
-        local s, res = pcall(HaystackConfig.isRainbow, hayId)
-        if s and res == true then return true end
+    if type(hayId) == "number" and HaystackConfig and type(HaystackConfig.mutationFor) == "function" then
+        local ok, inferredMutation = pcall(HaystackConfig.mutationFor, hayId)
+        if ok and type(inferredMutation) == "string" then
+            return MutationMultipliers[inferredMutation] or 1
+        end
     end
-
-    -- Color check: Normal hay is tan/yellow (Hue 0.08..0.17). Rare straws have Hue outside yellow with saturation
-    local h, s, v = part.Color:ToHSV()
-    if s > 0.35 and (h < 0.08 or h > 0.17) then
-        return true
+    if type(hayId) == "number" and HaystackConfig and type(HaystackConfig.isRainbow) == "function" then
+        local ok, rainbow = pcall(HaystackConfig.isRainbow, hayId)
+        if ok and rainbow then return MutationMultipliers.Rainbow end
     end
-
-    return false
+    return 1
 end
 
 -- Exact Candidate Gathering (replicated from NeedleHaystackClient getGrabCandidates)
@@ -1188,12 +1189,15 @@ local lastNoReachNoticeAt = 0
 -- Function to find ALL active Rainbow / RGB strands across the entire map
 local function getAllRainbowStrands()
     local haystack = workspace:FindFirstChild("HaystackClient")
+    local dropped = workspace:FindFirstChild("DroppedHay")
     local rgbList = {}
     local now = os.clock()
 
     if now - lastRainbowScanAt < 0.65 then
         for _, part in ipairs(cachedRainbowStrands) do
-            if part and part.Parent and part:IsDescendantOf(workspace) then
+            if part and ((part.Parent == haystack and type(part:GetAttribute("HayId")) == "number")
+                or part.Parent == dropped) and part:IsDescendantOf(workspace)
+                and getRareHayMultiplier(part) > 1 then
                 table.insert(rgbList, part)
             end
         end
@@ -1206,23 +1210,17 @@ local function getAllRainbowStrands()
         for _, p in ipairs(haystack:GetChildren()) do
             if p:IsA("BasePart") and p.Parent == haystack then
                 local hayId = p:GetAttribute("HayId")
-                if hayId then
-                    local attempt = recentlyAttemptedStrands[hayId]
-                    if not attempt or (now - attempt.time) > 2.5 or attempt.count < 3 then
-                        if isRainbowStrand(p) then
-                            table.insert(rgbList, p)
-                        end
-                    end
+                if type(hayId) == "number" and getRareHayMultiplier(p) > 1 then
+                    table.insert(rgbList, p)
                 end
             end
         end
     end
 
     -- 2. Check all strands in DroppedHay for rainbow pieces
-    local dropped = workspace:FindFirstChild("DroppedHay")
     if dropped then
         for _, d in ipairs(dropped:GetChildren()) do
-            if d:IsA("BasePart") and isRainbowStrand(d) then
+            if d:IsA("BasePart") and getRareHayMultiplier(d) > 1 then
                 table.insert(rgbList, d)
             end
         end
@@ -1230,6 +1228,26 @@ local function getAllRainbowStrands()
 
     cachedRainbowStrands = rgbList
     return rgbList
+end
+
+-- Rare pieces are selected by the game's value multiplier, not by the
+-- rotating edge-dig geometry used for ordinary hay.
+local function chooseRareHayPart(candidates, origin, maxDistance)
+    local bestPart, bestValue, bestDistance = nil, 1, math.huge
+    for _, part in ipairs(candidates) do
+        if part and part.Parent and part:IsA("BasePart") then
+            local distance = (part.Position - origin).Magnitude
+            local value = getRareHayMultiplier(part)
+            local hayId = part:GetAttribute("HayId")
+            local attempt = type(hayId) == "number" and recentlyAttemptedStrands[hayId] or nil
+            local coolingDown = attempt and attempt.count >= 3 and os.clock() - attempt.time < 2.5
+            if distance <= maxDistance and value > 1 and not coolingDown
+                and (value > bestValue or (value == bestValue and distance < bestDistance)) then
+                bestPart, bestValue, bestDistance = part, value, distance
+            end
+        end
+    end
+    return bestPart
 end
 
 local function getNearbyHayParts(origin, radius)
@@ -1240,25 +1258,6 @@ local function getNearbyHayParts(origin, radius)
     params.FilterDescendantsInstances = {haystack}
     params.MaxParts = 256
     return workspace:GetPartBoundsInRadius(origin, radius, params)
-end
-
-local function getNearbyRainbowStrands(origin, radius, droppedOrigin)
-    local rgbList = {}
-    for _, part in ipairs(getNearbyHayParts(origin, radius)) do
-        if part:IsA("BasePart") and part:GetAttribute("HayId") and isRainbowStrand(part) then
-            table.insert(rgbList, part)
-        end
-    end
-    local dropped = workspace:FindFirstChild("DroppedHay")
-    if dropped then
-        for _, part in ipairs(dropped:GetChildren()) do
-            if part:IsA("BasePart") and (part.Position - (droppedOrigin or origin)).Magnitude <= 20
-                and isRainbowStrand(part) then
-                table.insert(rgbList, part)
-            end
-        end
-    end
-    return rgbList
 end
 
 -- Keep the chosen dig area stable while the player moves. The known needle
@@ -1389,18 +1388,27 @@ chooseTntTarget = function(hrp)
     local haystack = workspace:FindFirstChild("HaystackClient")
     if not haystack then return nil end
     local origin = hrp.Position + Vector3.new(0, 2.5, 0)
-    local feasibleRare, feasibleNormal = {}, {}
+    local feasibleNormal = {}
+    if HubState.PrioritizeRGB then
+        local feasibleRare = {}
+        for _, part in ipairs(getAllRainbowStrands()) do
+            if part.Parent == haystack and (part.Position - hrp.Position).Magnitude <= 32
+                and solveTntVelocity(origin, part.Position) then
+                table.insert(feasibleRare, part)
+            end
+        end
+        local rareTarget = chooseRareHayPart(feasibleRare, hrp.Position, 32)
+        if rareTarget then return rareTarget.Position end
+    end
     local scanOrigin = hrp.Position + Vector3.new(0, 7, 0)
     for _, part in ipairs(getNearbyHayParts(scanOrigin, 32)) do
         if part:IsA("BasePart") and part.Parent == haystack
             and type(part:GetAttribute("HayId")) == "number"
             and solveTntVelocity(origin, part.Position) then
             table.insert(feasibleNormal, part)
-            if isRainbowStrand(part) then table.insert(feasibleRare, part) end
         end
     end
-    local candidates = HubState.PrioritizeRGB and #feasibleRare > 0 and feasibleRare or feasibleNormal
-    local chosen = chooseSmartHayPart(candidates, hrp.Position, 32, haystack)
+    local chosen = chooseSmartHayPart(feasibleNormal, hrp.Position, 32, haystack)
     return chosen and chosen.Position or nil
 end
 
@@ -1595,39 +1603,27 @@ local farmThread = task.spawn(function()
                     local myPos = hrp.Position
                     local haystack = workspace:FindFirstChild("HaystackClient")
 
-                    -- 2. FULL RAINBOW HUNTING
+                    -- 2. Rare strands anywhere in the rendered pile, constrained
+                    -- only by the active tool's real reach in no-teleport mode.
                     local rgbStrands = {}
                     if HubState.PrioritizeRGB then
-                        if HubState.NoTeleportMode then
-                            local reach = getToolReach(activeSlot)
-                            local scanOrigin = myPos + Vector3.new(0, math.min(reach * 0.35, 6), 0)
-                            rgbStrands = getNearbyRainbowStrands(scanOrigin, reach, myPos)
-                        else
-                            rgbStrands = getAllRainbowStrands()
-                        end
+                        rgbStrands = getAllRainbowStrands()
                     end
 
                     local targetRgb = nil
                     if #rgbStrands > 0 then
-                        local rareHay = {}
-                        local nearestDropped, nearestDroppedDistance = nil, math.huge
+                        local reachableRare = {}
                         for _, candidate in ipairs(rgbStrands) do
                             local isDropped = candidate.Parent and candidate.Parent.Name == "DroppedHay"
                             local reachable = isDropped and (candidate.Position - myPos).Magnitude <= 20
                                 or isHayWithinReach(candidate, myPos, activeSlot)
                             if not HubState.NoTeleportMode or reachable then
-                                if isDropped then
-                                    local dist = (candidate.Position - myPos).Magnitude
-                                    if dist < nearestDroppedDistance then
-                                        nearestDropped, nearestDroppedDistance = candidate, dist
-                                    end
-                                elseif candidate.Parent == haystack then
-                                    table.insert(rareHay, candidate)
+                                if isDropped or candidate.Parent == haystack then
+                                    table.insert(reachableRare, candidate)
                                 end
                             end
                         end
-                        targetRgb = nearestDropped or chooseSmartHayPart(rareHay, myPos,
-                            HubState.NoTeleportMode and getToolReach(activeSlot) or math.huge, haystack)
+                        targetRgb = chooseRareHayPart(reachableRare, myPos, math.huge)
                     end
 
                     if targetRgb then
@@ -2446,15 +2442,23 @@ local espThread = task.spawn(function()
         if HubState.RgbESP and IS_GAMEPLAY then
             local haystack = workspace:FindFirstChild("HaystackClient")
             if haystack then
-                local count = 0
-                for _, p in ipairs(haystack:GetChildren()) do
-                    if p:IsA("BasePart") and isRainbowStrand(p) then
-                        count = count + 1
-                        if count <= 25 then
-                            local dist = math.floor((myPos - p.Position).Magnitude)
-                            updateBillboard("RGB_" .. tostring(p:GetAttribute("HayId") or count), p, "FENO RARO [" .. dist .. " studs]", Color3.fromRGB(255, 100, 255))
-                        end
+                local rareParts = {}
+                for _, p in ipairs(getAllRainbowStrands()) do
+                    if p.Parent == haystack and type(p:GetAttribute("HayId")) == "number" then
+                        table.insert(rareParts, {part = p, value = getRareHayMultiplier(p), distance = (myPos - p.Position).Magnitude})
                     end
+                end
+                table.sort(rareParts, function(a, b)
+                    if a.value ~= b.value then return a.value > b.value end
+                    return a.distance < b.distance
+                end)
+                for i = 1, math.min(25, #rareParts) do
+                    local entry = rareParts[i]
+                    local p = entry.part
+                    local mutation = tostring(p:GetAttribute("HayMutation") or "Raro")
+                    updateBillboard("RGB_" .. tostring(p:GetAttribute("HayId")), p,
+                        mutation .. " x" .. tostring(entry.value) .. " [" .. math.floor(entry.distance) .. " studs]",
+                        Color3.fromRGB(255, 100, 255))
                 end
             end
         end
@@ -3362,20 +3366,22 @@ local function buildNativeUI()
         thumb.Parent = track
         local thumbC = Instance.new("UICorner") thumbC.CornerRadius = UDim.new(1, 0) thumbC.Parent = thumb
 
-        local state = default
-        local function toggleState()
-            state = not state
-            if state then
+        frame:SetAttribute("HubToggleState", default == true)
+        local function renderToggleState()
+            if frame:GetAttribute("HubToggleState") == true then
                 tweenGui(track, {BackgroundColor3 = UI_THEME.accentDark}, 0.18)
                 tweenGui(thumb, {Position = UDim2.new(1, -21, 0.5, -9)}, 0.18)
             else
                 tweenGui(track, {BackgroundColor3 = UI_THEME.sidebar}, 0.18)
                 tweenGui(thumb, {Position = UDim2.new(0, 3, 0.5, -9)}, 0.18)
             end
-            callback(state)
         end
-
-        track.MouseButton1Click:Connect(toggleState)
+        frame:GetAttributeChangedSignal("HubToggleState"):Connect(renderToggleState)
+        track.MouseButton1Click:Connect(function()
+            local newValue = frame:GetAttribute("HubToggleState") ~= true
+            frame:SetAttribute("HubToggleState", newValue)
+            callback(newValue)
+        end)
         return frame
     end
 
@@ -3657,53 +3663,100 @@ local function buildNativeUI()
         local consoleTab = createTab("Atividade", "LOGS")
         local setTab = createTab("Ajustes", "CFG")
 
-        -- 1. Auto Farm Tab
-        addNativeSection(farmTab, "Automacao da colheita", Color3.fromRGB(99, 102, 241))
-        addNativeToggle(farmTab, "Nao mover meu personagem", HubState.NoTeleportMode, function(val)
-            HubState.NoTeleportMode = val
-            if val then stopVacuumAutomation() end
-            addLog("info", "Modo sem teleporte: " .. tostring(val))
+        -- 1. One-action routine, with only the most useful individual controls.
+        local routineFrames = {}
+        local routineMaster = nil
+        local function routineIsComplete()
+            return HubState.AutoFarmHay and HubState.AutoSell and HubState.AutoBuyTools
+                and HubState.AutoBuyUpgrades and HubState.AutoEquipBestTool
+                and HubState.AutoUseTnt and HubState.AutoCollectGems
+                and HubState.AutoDeployDrone and HubState.AutoWinNeedle
+                and HubState.PrioritizeRGB
+        end
+        local function syncRoutineControls()
+            for key, frame in pairs(routineFrames) do
+                if frame and frame.Parent then
+                    local active = key == "AutoBuy" and HubState.AutoBuyTools and HubState.AutoBuyUpgrades
+                        or HubState[key] == true
+                    frame:SetAttribute("HubToggleState", active == true)
+                end
+            end
+            if routineMaster and routineMaster.Parent then
+                routineMaster:SetAttribute("HubToggleState", routineIsComplete() == true)
+            end
+        end
+
+        addNativeSection(farmTab, "Rotina automatica", Color3.fromRGB(99, 102, 241))
+        routineMaster = addNativeToggle(farmTab, "Automacao completa: farm + venda + compras", false, function(enabled)
+            HubState.AutoFarmHay = enabled
+            HubState.AutoSell = enabled
+            HubState.AutoBuyTools = enabled
+            HubState.AutoBuyUpgrades = enabled
+            HubState.AutoEquipBestTool = enabled
+            HubState.AutoUseTnt = enabled
+            HubState.AutoCollectGems = enabled
+            HubState.AutoDeployDrone = enabled
+            HubState.AutoWinNeedle = enabled
+            if enabled then
+                HubState.PrioritizeRGB = true
+                HubState.ForcedToolSlot = 0
+                local bestSlot = getBestAvailableToolSlot()
+                equipToolSlot(bestSlot, true)
+            else
+                stopVacuumAutomation()
+            end
+            syncRoutineControls()
+            addLog("info", enabled and "Rotina completa ligada." or "Rotina completa desligada.")
         end)
-        addNativeParagraph(farmTab, "Como funciona sem teleporte", "Escava na borda do meio para cima, variando setores. TNT e feno raro seguem a faixa; o alcance da ferramenta continua valendo.", Color3.fromRGB(99, 102, 241))
-        addNativeToggle(farmTab, "Auto coletar feno ao alcance", HubState.AutoFarmHay, function(val)
+        addNativeParagraph(farmTab, "Um controle", "Liga farm, ferramenta, TNT, gemas, drone, venda e compras. Puzzles do Porao seguem manuais.", Color3.fromRGB(99, 102, 241))
+        local routineStatus = addNativeParagraph(farmTab, "Estado atual", "Aguardando...", Color3.fromRGB(99, 102, 241))
+        task.spawn(function()
+            while IsHubLoaded and routineStatus and routineStatus.Parent do
+                routineStatus.Text = string.format("Farm %s | Compra %s | Venda %s | %s",
+                    HubState.AutoFarmHay and "ON" or "OFF",
+                    (HubState.AutoBuyTools or HubState.AutoBuyUpgrades) and "ON" or "OFF",
+                    HubState.AutoSell and "ON" or "OFF",
+                    HubState.NoTeleportMode and "sem TP" or "TP automatico")
+                task.wait(1)
+            end
+        end)
+
+        addNativeSection(farmTab, "Ajustes rapidos", Color3.fromRGB(99, 102, 241))
+        routineFrames.AutoFarmHay = addNativeToggle(farmTab, "Auto farm", HubState.AutoFarmHay, function(val)
             HubState.AutoFarmHay = val
             if not val then stopVacuumAutomation() end
-            addLog("info", "Auto Farm Hay: " .. tostring(val))
+            syncRoutineControls()
         end)
-        addNativeToggle(farmTab, "Auto-Equip Best Tool (Vacuum/Pitchfork)", HubState.AutoEquipBestTool, function(val)
-            HubState.AutoEquipBestTool = val
-            if val then
-                local bestSlot = getBestAvailableToolSlot()
-                equipToolSlot(bestSlot)
-            end
-            addLog("info", "Auto-Equip Best Tool: " .. tostring(val))
+        addNativeToggle(farmTab, "Ficar livre, sem teleporte", HubState.NoTeleportMode, function(val)
+            HubState.NoTeleportMode = val
+            addLog("info", val and "Teleporte automatico desligado." or "Teleporte automatico permitido.")
         end)
-        addNativeToggle(farmTab, "Auto-Use TNT (Explosive Cleaver)", HubState.AutoUseTnt, function(val)
+        addNativeParagraph(farmTab, "Prioridade real", "Raros por valor, em qualquer altura; comuns nas bordas. Sem TP, vale o alcance da ferramenta.", Color3.fromRGB(99, 102, 241))
+        routineFrames.PrioritizeRGB = addNativeToggle(farmTab, "Priorizar feno raro / RGB", HubState.PrioritizeRGB, function(val)
+            HubState.PrioritizeRGB = val
+            syncRoutineControls()
+        end)
+        routineFrames.AutoBuy = addNativeToggle(farmTab, "Auto comprar ferramentas e melhorias", false, function(val)
+            HubState.AutoBuyTools = val
+            HubState.AutoBuyUpgrades = val
+            syncRoutineControls()
+        end)
+        routineFrames.AutoSell = addNativeToggle(farmTab, "Auto vender quando encher", HubState.AutoSell, function(val)
+            HubState.AutoSell = val
+            syncRoutineControls()
+        end)
+        routineFrames.AutoUseTnt = addNativeToggle(farmTab, "TNT automatico", HubState.AutoUseTnt, function(val)
             HubState.AutoUseTnt = val
-            addLog("info", "Auto-Use TNT: " .. tostring(val))
+            syncRoutineControls()
         end)
+        routineFrames.AutoWinNeedle = addNativeToggle(farmTab,
+            IS_BASEMENT and "Auto coletar chave / abrir saida" or "Auto coletar / entregar Agulha",
+            HubState.AutoWinNeedle, function(val)
+                HubState.AutoWinNeedle = val
+                syncRoutineControls()
+            end)
         addNativeSlider(farmTab, "Espera extra do TNT (0 = cooldown)", 0, 60, HubState.TntInterval, function(val)
             HubState.TntInterval = val
-        end)
-        addNativeToggle(farmTab, "Prioritize Rare / RGB / Void (20x Value)", HubState.PrioritizeRGB, function(val)
-            HubState.PrioritizeRGB = val
-            addLog("info", "Prioritize Rare Straws: " .. tostring(val))
-        end)
-        addNativeToggle(farmTab, "Auto coletar gemas ao alcance", HubState.AutoCollectGems, function(val)
-            HubState.AutoCollectGems = val
-            addLog("info", "Auto Collect Gems: " .. tostring(val))
-        end)
-        addNativeToggle(farmTab, "Auto vender quando a bolsa encher", HubState.AutoSell, function(val)
-            HubState.AutoSell = val
-            addLog("info", "Auto Sell: " .. tostring(val))
-        end)
-        addNativeToggle(farmTab, IS_BASEMENT and "Auto coletar chave / usar ao mirar fechadura"
-            or "Auto coletar/entregar Agulha ao alcance", HubState.AutoWinNeedle, function(val)
-            HubState.AutoWinNeedle = val
-            addLog("info", "Auto-Win Needle: " .. tostring(val))
-        end)
-        addNativeToggle(farmTab, "Auto Deploy Drone", HubState.AutoDeployDrone, function(val)
-            HubState.AutoDeployDrone = val
         end)
 
         addNativeSection(farmTab, "Ferramentas detectadas", Color3.fromRGB(99, 102, 241))
@@ -3719,12 +3772,12 @@ local function buildNativeUI()
             end
         end)
 
-        addNativeSection(farmTab, "Acoes manuais", Color3.fromRGB(99, 102, 241))
-        addNativeButton(farmTab, "Auto-Select Best Available Tool", function()
+        addNativeSection(farmTab, "Acoes rapidas", Color3.fromRGB(99, 102, 241))
+        addNativeButton(farmTab, "Equipar melhor ferramenta", function()
             HubState.ForcedToolSlot = 0
             local bestSlot = getBestAvailableToolSlot()
             equipToolSlot(bestSlot)
-            addLog("info", "Reset tool selection to Auto: Equipped Slot " .. bestSlot)
+            addLog("info", "Ferramenta escolhida: slot " .. bestSlot)
         end)
         addNativeButton(farmTab, "Arremessar TNT no feno alcancavel", function()
             local hrp = getHRP()
@@ -3737,28 +3790,6 @@ local function buildNativeUI()
                 end
             end
         end, true)
-        addNativeButton(farmTab, "Equip Vacuum (Slot 5)", function()
-            if equipToolSlot(SLOT_VACUUM) then HubState.ForcedToolSlot = SLOT_VACUUM end
-        end)
-        addNativeButton(farmTab, "Equip Pitchfork (Slot 3)", function()
-            if equipToolSlot(SLOT_PITCHFORK) then HubState.ForcedToolSlot = SLOT_PITCHFORK end
-        end)
-        addNativeButton(farmTab, "Equip TNT (Slot 2)", function()
-            if equipToolSlot(SLOT_TNT) then HubState.ForcedToolSlot = SLOT_TNT end
-        end)
-        addNativeButton(farmTab, "Equip Hand (Slot 1)", function()
-            if equipToolSlot(SLOT_HAND) then HubState.ForcedToolSlot = SLOT_HAND end
-        end)
-        addNativeButton(farmTab, "Deploy Drone Now (Slot 4)", function()
-            if not isToolOwned("Drone") then
-                addLog("warn", "O Drone ainda nao foi comprado.")
-            elseif Remotes.DeployDrone then
-                pcall(function() Remotes.DeployDrone:FireServer() end)
-                addLog("info", "Fired DeployDrone command")
-            end
-        end)
-
-        addNativeSection(farmTab, "Acoes rapidas", Color3.fromRGB(99, 102, 241))
         addNativeButton(farmTab, "Vender agora sem mover personagem", function()
             stopVacuumAutomation()
             if Remotes.SellHay then Remotes.SellHay:FireServer() end
@@ -3770,11 +3801,6 @@ local function buildNativeUI()
         local matchCashCard = addNativeParagraph(shopTab, "Saldo da partida", formatCash(getCashBalance()) .. " moedas | " .. formatNumber(getGemBalance()) .. " gemas. Opcoes da loja oficial.", Color3.fromRGB(99, 102, 241))
         addNativeParagraph(shopTab, "Compra automatica segura", "Tenta Forquilha > TNT > Drone > Aspirador. Usa apenas moedas da partida; nunca abre Robux nem gasta gemas automaticamente.", Color3.fromRGB(99, 102, 241))
         
-        addNativeToggle(shopTab, "Auto Buy Barn Tools (Feno)", HubState.AutoBuyTools, function(val)
-            HubState.AutoBuyTools = val
-            addLog("info", "Auto-Buy Barn Tools: " .. tostring(val))
-        end)
-        
         local toolPurchaseButtons = {}
         for _, toolId in ipairs(barnToolNames) do
             local capturedToolId = toolId
@@ -3785,11 +3811,6 @@ local function buildNativeUI()
 
         addNativeSection(shopTab, "Melhorias da partida", Color3.fromRGB(99, 102, 241))
         addNativeParagraph(shopTab, "Upgrades de sessao", "Mostra nivel e preco real. Opcoes de ferramentas ficam bloqueadas ate voce possuir o item correspondente.", Color3.fromRGB(99, 102, 241))
-        
-        addNativeToggle(shopTab, "Auto Buy Session Upgrades (Feno)", HubState.AutoBuyUpgrades, function(val)
-            HubState.AutoBuyUpgrades = val
-            addLog("info", "Auto-Buy Session Upgrades: " .. tostring(val))
-        end)
         
         local UpgradeLabels = {
             Capacity = "Mochila: capacidade", HandHold = "Mao: coleta continua", Speed = "Mao: velocidade", Grab = "Mao: quantidade",

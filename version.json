@@ -1,7 +1,7 @@
 {
-  "version": "6.11",
-  "versionNumber": 71,
+  "version": "6.12",
+  "versionNumber": 72,
   "gameCompatibility": "Lobby/Farmhouse v1068; Basement PlaceVersion 510 (dump 2026-09-13)",
   "releaseDate": "2026-09-14",
-  "releaseNotes": "Anchors the UI window by its top edge so minimizing and restoring change only panel height; the title bar no longer shifts during the animation."
+  "releaseNotes": "Prioritizes hay using the game's HayMutation multiplier before normal edge digging; adds one-switch gameplay automation for farm, selling, safe purchases, TNT, gems, drone, and objective handling, with optional no-teleport mode."
 }
