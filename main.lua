@@ -1,5 +1,5 @@
 --[[
-    SEARCH FOR THE NEEDLE - ULTIMATE AUTOMATION HUB v6.13 PRO
+    SEARCH FOR THE NEEDLE - ULTIMATE AUTOMATION HUB v6.14 PRO
     Forensically Engineered from Luau Decompiler Bytecode Dump
     - Exact Multi-Grab Batching using LocalPlayer:GetAttribute("HayGrabCount") & getGrabCandidates
     - Rare / RGB priority via HayMutation and the game's value multipliers
@@ -130,7 +130,7 @@ else
     GAME_MODE_NAME = "Place " .. tostring(CURRENT_PLACE_ID)
 end
 local CURRENT_PLACE_NAME = GAME_MODE_NAME
-local SCRIPT_VERSION = "6.13"
+local SCRIPT_VERSION = "6.14"
 local CurrentContextMode = IS_LOBBY and "Lobby" or "Match"
 
 -- Require game Config if available for exact mathematical rainbow calculations
@@ -1250,13 +1250,13 @@ local function chooseRareHayPart(candidates, origin, maxDistance)
     return bestPart
 end
 
-local function getNearbyHayParts(origin, radius)
+local function getNearbyHayParts(origin, radius, maxParts)
     local haystack = workspace:FindFirstChild("HaystackClient")
     if not haystack then return {} end
     local params = OverlapParams.new()
     params.FilterType = Enum.RaycastFilterType.Include
     params.FilterDescendantsInstances = {haystack}
-    params.MaxParts = 256
+    params.MaxParts = maxParts == nil and 256 or maxParts
     return workspace:GetPartBoundsInRadius(origin, radius, params)
 end
 
@@ -1384,6 +1384,26 @@ local function chooseSmartHayPart(candidates, origin, maxDistance, haystack)
     return chosen
 end
 
+-- When the player moves freely, harvest nearby hay at any height. The edge
+-- pattern is useful for autonomous TP digging, but must not gate local picks.
+local function chooseLocalHayPart(candidates, origin, maxDistance, haystack)
+    local chosen, bestScore = nil, -math.huge
+    for _, part in ipairs(candidates) do
+        if part:IsA("BasePart") and part.Parent == haystack then
+            local hayId = part:GetAttribute("HayId")
+            if type(hayId) == "number" then
+                local distance = (part.Position - origin).Magnitude
+                if distance <= maxDistance then
+                    local score = -distance - math.abs(part.Position.Y - origin.Y) * 0.12
+                    if hayId == lastDigHayId then score = score - 8 end
+                    if score > bestScore then chosen, bestScore = part, score end
+                end
+            end
+        end
+    end
+    return chosen
+end
+
 chooseTntTarget = function(hrp)
     local haystack = workspace:FindFirstChild("HaystackClient")
     if not haystack then return nil end
@@ -1401,14 +1421,21 @@ chooseTntTarget = function(hrp)
         if rareTarget then return rareTarget.Position end
     end
     local scanOrigin = hrp.Position + Vector3.new(0, 7, 0)
-    for _, part in ipairs(getNearbyHayParts(scanOrigin, 32)) do
+    local nearby = HubState.NoTeleportMode and getNearbyHayParts(hrp.Position, 32, 0)
+        or getNearbyHayParts(scanOrigin, 32)
+    for _, part in ipairs(nearby) do
         if part:IsA("BasePart") and part.Parent == haystack
             and type(part:GetAttribute("HayId")) == "number"
             and solveTntVelocity(origin, part.Position) then
             table.insert(feasibleNormal, part)
         end
     end
-    local chosen = chooseSmartHayPart(feasibleNormal, hrp.Position, 32, haystack)
+    local chosen
+    if HubState.NoTeleportMode then
+        chosen = chooseLocalHayPart(feasibleNormal, hrp.Position, 32, haystack)
+    else
+        chosen = chooseSmartHayPart(feasibleNormal, hrp.Position, 32, haystack)
+    end
     return chosen and chosen.Position or nil
 end
 
@@ -1658,11 +1685,14 @@ local farmThread = task.spawn(function()
                         -- 3. NORMAL HAY HARVESTING (when 0 RGB straws remain on field)
                         if haystack then
                             local reach = getToolReach(activeSlot)
-                            local scanOrigin = myPos + Vector3.new(0, math.min(reach * 0.35, 6), 0)
-                            local children = HubState.NoTeleportMode and getNearbyHayParts(scanOrigin, reach)
+                            local children = HubState.NoTeleportMode and getNearbyHayParts(myPos, reach, 0)
                                 or haystack:GetChildren()
-                            local primaryPart = chooseSmartHayPart(children, myPos,
-                                HubState.NoTeleportMode and reach or math.huge, haystack)
+                            local primaryPart
+                            if HubState.NoTeleportMode then
+                                primaryPart = chooseLocalHayPart(children, myPos, reach, haystack)
+                            else
+                                primaryPart = chooseSmartHayPart(children, myPos, math.huge, haystack)
+                            end
 
                             if primaryPart then
                                 if not HubState.NoTeleportMode and (primaryPart.Position - myPos).Magnitude > 8 then
@@ -1677,7 +1707,7 @@ local farmThread = task.spawn(function()
                                 end
                             elseif HubState.NoTeleportMode and os.clock() - lastNoReachNoticeAt >= 8 then
                                 lastNoReachNoticeAt = os.clock()
-                                addLog("info", "Sem feno da metade superior ao alcance. Aproxime-se da lateral alta do monte; seu personagem continua livre.")
+                                addLog("info", "Sem feno ao alcance da ferramenta. Aproxime-se do feno; seu personagem continua livre.")
                             end
                         end
 
@@ -3667,6 +3697,7 @@ local function buildNativeUI()
         addNativeSection(farmTab, "Automation", Color3.fromRGB(99, 102, 241))
         addNativeToggle(farmTab, "Auto Farm", HubState.AutoFarmHay, function(val)
             HubState.AutoFarmHay = val
+            HubState.NoTeleportMode = not val
             HubState.AutoEquipBestTool = val
             HubState.AutoUseTnt = val
             HubState.AutoCollectGems = val
@@ -3679,7 +3710,7 @@ local function buildNativeUI()
             else
                 stopVacuumAutomation()
             end
-            addLog("info", val and "Auto Farm ligado: raros, melhor ferramenta, TNT, gemas e drone."
+            addLog("info", val and "Auto Farm ligado: TP automatico, raros, melhor ferramenta, TNT, gemas e drone."
                 or "Auto Farm desligado.")
         end)
         addNativeToggle(farmTab, "Auto Buy", HubState.AutoBuyTools and HubState.AutoBuyUpgrades, function(val)

@@ -1,7 +1,7 @@
 {
-  "version": "6.13",
-  "versionNumber": 73,
+  "version": "6.14",
+  "versionNumber": 74,
   "gameCompatibility": "Lobby/Farmhouse v1068; Basement PlaceVersion 510 (dump 2026-09-13)",
   "releaseDate": "2026-09-14",
-  "releaseNotes": "Replaces the global automation switch with separate Auto Farm, Auto Buy, Auto Sell, and Auto Objective controls. Auto Farm includes rare-hay priority, best tool, TNT, gems, and drone; manual travel stays separate."
+  "releaseNotes": "Auto Farm now enables automatic teleporting as part of the same switch and prioritizes rare hay globally. The no-teleport harvesting path can also pick nearby hay at any height instead of requiring the upper rim."
 }
