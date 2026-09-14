@@ -1,7 +1,7 @@
 {
-  "version": "6.5",
-  "versionNumber": 65,
+  "version": "6.6",
+  "versionNumber": 66,
   "gameCompatibility": "Lobby/Farmhouse v1068; Basement PlaceVersion 510 (dump 2026-09-13)",
   "releaseDate": "2026-09-14",
-  "releaseNotes": "Simplifies the UI header, removes redundant status and diagnostics cards, and makes close collapse the window in place with no separate floating launcher."
+  "releaseNotes": "Restores separate minimize and close behavior: minimize keeps the title bar in place, close hides the window, and a draggable circular launcher reopens it."
 }

@@ -1,5 +1,5 @@
 --[[
-    SEARCH FOR THE NEEDLE - ULTIMATE AUTOMATION HUB v6.5 PRO
+    SEARCH FOR THE NEEDLE - ULTIMATE AUTOMATION HUB v6.6 PRO
     Forensically Engineered from Luau Decompiler Bytecode Dump
     - Exact Multi-Grab Batching using LocalPlayer:GetAttribute("HayGrabCount") & getGrabCandidates
     - Rainbow / RGB Straw Priority via Neon, Material, and Config.isRainbow(hayId)
@@ -130,7 +130,7 @@ else
     GAME_MODE_NAME = "Place " .. tostring(CURRENT_PLACE_ID)
 end
 local CURRENT_PLACE_NAME = GAME_MODE_NAME
-local SCRIPT_VERSION = "6.5"
+local SCRIPT_VERSION = "6.6"
 local CurrentContextMode = IS_LOBBY and "Lobby" or "Match"
 
 -- Require game Config if available for exact mathematical rainbow calculations
@@ -2557,7 +2557,7 @@ local function tweenGui(obj, props, duration, style, direction)
     return tw
 end
 
--- Floating Toggle Pill on Screen
+-- Floating Toggle Button on Screen
 local function createFloatingToggleButton(toggleCallback)
     if FloatingButtonGui then FloatingButtonGui:Destroy() end
 
@@ -2572,56 +2572,43 @@ local function createFloatingToggleButton(toggleCallback)
 
     local floatBtn = Instance.new("TextButton")
     floatBtn.Name = "MenuToggle"
-    floatBtn.Size = UDim2.fromOffset(154, 42)
-    floatBtn.Position = UDim2.fromOffset(16, getUIViewport().Y * 0.45)
-    floatBtn.BackgroundColor3 = UI_THEME.header
-    floatBtn.BackgroundTransparency = 0.08
+    floatBtn.Size = UDim2.fromOffset(48, 48)
+    floatBtn.Position = UDim2.fromOffset(16, getUIViewport().Y * 0.45 - 24)
+    floatBtn.BackgroundColor3 = UI_THEME.accentDark
+    floatBtn.BackgroundTransparency = 0.02
     floatBtn.Text = ""
     floatBtn.AutoButtonColor = false
     floatBtn.Parent = floatGui
 
     local corner = Instance.new("UICorner")
-    corner.CornerRadius = UDim.new(0, 21)
+    corner.CornerRadius = UDim.new(1, 0)
     corner.Parent = floatBtn
 
     local stroke = Instance.new("UIStroke")
-    stroke.Color = UI_THEME.border
-    stroke.Transparency = 0.45
-    stroke.Thickness = 1
+    stroke.Color = UI_THEME.accent
+    stroke.Transparency = 0.2
+    stroke.Thickness = 1.5
     stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
     stroke.Parent = floatBtn
 
-    -- Compact launcher; it remains visible after the main window is hidden.
-    local dot = Instance.new("Frame")
-    dot.Size = UDim2.fromOffset(8, 8)
-    dot.Position = UDim2.new(0, 12, 0.5, -4)
-    dot.BackgroundColor3 = UI_THEME.accent
-    dot.BorderSizePixel = 0
-    dot.Parent = floatBtn
-    local dotCorner = Instance.new("UICorner")
-    dotCorner.CornerRadius = UDim.new(1, 0)
-    dotCorner.Parent = dot
-
-    -- Text Label
+    -- Circular launcher, shown only after the main window is closed.
     local lbl = Instance.new("TextLabel")
-    lbl.Size = UDim2.new(1, -28, 1, 0)
-    lbl.Position = UDim2.fromOffset(26, 0)
+    lbl.Size = UDim2.fromScale(1, 1)
     lbl.BackgroundTransparency = 1
-    lbl.Text = "NEEDLE HUB"
+    lbl.Text = "N"
     lbl.TextColor3 = UI_THEME.text
-    lbl.Font = Enum.Font.GothamMedium
-    lbl.TextSize = 13
-    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.Font = Enum.Font.GothamBold
+    lbl.TextSize = 18
     lbl.Parent = floatBtn
 
     -- Hover effect
     floatBtn.MouseEnter:Connect(function()
-        tweenGui(floatBtn, {BackgroundColor3 = UI_THEME.cardHover}, 0.18)
-        tweenGui(stroke, {Transparency = 0.2}, 0.18)
+        tweenGui(floatBtn, {BackgroundColor3 = Color3.fromRGB(49, 96, 92)}, 0.18)
+        tweenGui(stroke, {Transparency = 0}, 0.18)
     end)
     floatBtn.MouseLeave:Connect(function()
-        tweenGui(floatBtn, {BackgroundColor3 = UI_THEME.header}, 0.18)
-        tweenGui(stroke, {Transparency = 0.45}, 0.18)
+        tweenGui(floatBtn, {BackgroundColor3 = UI_THEME.accentDark}, 0.18)
+        tweenGui(stroke, {Transparency = 0.2}, 0.18)
     end)
 
     local function clampFloat(x, y)
@@ -2683,6 +2670,7 @@ local function createFloatingToggleButton(toggleCallback)
     end
     trackUIConnection(workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(bindFloatCamera))
     bindFloatCamera()
+    return floatGui
 end
 
 -- Version & GitHub Update Status Store
@@ -2967,9 +2955,10 @@ local function buildNativeUI()
         setWindowMinimized(not isMinimized)
     end)
 
-    -- Close means collapse in place; the compact bar is the way back.
+    -- Close hides the window. The circular launcher is the only way to reopen it.
     closeBtn.MouseButton1Click:Connect(function()
-        setWindowMinimized(true)
+        mainFrame.Visible = false
+        if FloatingButtonGui then FloatingButtonGui.Enabled = true end
     end)
 
     -- Viewport Clamped Window Dragging
@@ -4013,6 +4002,14 @@ local function buildNativeUI()
         end, true)
     end
 
+    local floatingToggleGui = createFloatingToggleButton(function()
+        mainFrame.Visible = true
+        updateResponsiveScale()
+        clampWindowPosition()
+        if FloatingButtonGui then FloatingButtonGui.Enabled = false end
+    end)
+    -- Do not duplicate controls while the menu itself is open or minimized.
+    floatingToggleGui.Enabled = false
 end
 
 -- Background Watcher: Game PlaceVersion Update Detection
