@@ -1,5 +1,5 @@
 --[[
-    SEARCH FOR THE NEEDLE - ULTIMATE AUTOMATION HUB v6.8 PRO
+    SEARCH FOR THE NEEDLE - ULTIMATE AUTOMATION HUB v6.9 PRO
     Forensically Engineered from Luau Decompiler Bytecode Dump
     - Exact Multi-Grab Batching using LocalPlayer:GetAttribute("HayGrabCount") & getGrabCandidates
     - Rainbow / RGB Straw Priority via Neon, Material, and Config.isRainbow(hayId)
@@ -130,7 +130,7 @@ else
     GAME_MODE_NAME = "Place " .. tostring(CURRENT_PLACE_ID)
 end
 local CURRENT_PLACE_NAME = GAME_MODE_NAME
-local SCRIPT_VERSION = "6.8"
+local SCRIPT_VERSION = "6.9"
 local CurrentContextMode = IS_LOBBY and "Lobby" or "Match"
 
 -- Require game Config if available for exact mathematical rainbow calculations
@@ -2914,7 +2914,7 @@ local function buildNativeUI()
     titleLabel.TextXAlignment = Enum.TextXAlignment.Left
     titleLabel.Parent = titleBar
 
-    local versionLabel = Instance.new("TextLabel")
+    local versionLabel = Instance.new("TextButton")
     versionLabel.Name = "InstalledVersion"
     versionLabel.Size = UDim2.fromOffset(54, 22)
     versionLabel.Position = UDim2.new(0, 174, 0.5, -11)
@@ -2924,7 +2924,10 @@ local function buildNativeUI()
     versionLabel.Font = Enum.Font.GothamMedium
     versionLabel.TextSize = 12
     versionLabel.TextXAlignment = Enum.TextXAlignment.Left
+    versionLabel.AutoButtonColor = false
     versionLabel.Parent = titleBar
+    versionLabel.MouseEnter:Connect(function() versionLabel.TextColor3 = UI_THEME.accent end)
+    versionLabel.MouseLeave:Connect(function() versionLabel.TextColor3 = UI_THEME.muted end)
 
     -- Live account balance; the authoritative replicated Data service is used.
     local gemPill = Instance.new("Frame")
@@ -4069,6 +4072,11 @@ local function buildNativeUI()
         end
         checkButton = addNativeButton(setTab, "Verificar versao no GitHub", refreshVersionCard)
         refreshVersionCard()
+        versionLabel.MouseButton1Click:Connect(function()
+            setWindowMinimized(false)
+            selectTab("Ajustes")
+            refreshVersionCard()
+        end)
 
         addNativeButton(setTab, "Atualizar / Recarregar Script (Auto-Download)", function()
             versionCard.Text = "Instalada: v" .. SCRIPT_VERSION .. "\nBaixando script do GitHub..."
