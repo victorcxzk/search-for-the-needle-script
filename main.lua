@@ -1,5 +1,5 @@
 --[[
-    SEARCH FOR THE NEEDLE - ULTIMATE AUTOMATION HUB v6.10 PRO
+    SEARCH FOR THE NEEDLE - ULTIMATE AUTOMATION HUB v6.11 PRO
     Forensically Engineered from Luau Decompiler Bytecode Dump
     - Exact Multi-Grab Batching using LocalPlayer:GetAttribute("HayGrabCount") & getGrabCandidates
     - Rainbow / RGB Straw Priority via Neon, Material, and Config.isRainbow(hayId)
@@ -130,7 +130,7 @@ else
     GAME_MODE_NAME = "Place " .. tostring(CURRENT_PLACE_ID)
 end
 local CURRENT_PLACE_NAME = GAME_MODE_NAME
-local SCRIPT_VERSION = "6.10"
+local SCRIPT_VERSION = "6.11"
 local CurrentContextMode = IS_LOBBY and "Lobby" or "Match"
 
 -- Require game Config if available for exact mathematical rainbow calculations
@@ -2800,8 +2800,8 @@ local function buildNativeUI()
     local mainFrame = Instance.new("Frame")
     mainFrame.Name = "MainFrame"
     mainFrame.Size = UDim2.fromOffset(WIN_WIDTH, WIN_HEIGHT)
-    mainFrame.Position = UDim2.fromScale(0.5, 0.5)
-    mainFrame.AnchorPoint = Vector2.new(0.5, 0.5)
+    mainFrame.Position = UDim2.new(0.5, 0, 0.5, -WIN_HEIGHT / 2)
+    mainFrame.AnchorPoint = Vector2.new(0.5, 0)
     mainFrame.BackgroundColor3 = UI_THEME.shell
     mainFrame.BackgroundTransparency = 0.1
     mainFrame.BorderSizePixel = 0
@@ -2812,26 +2812,29 @@ local function buildNativeUI()
     responsiveScale.Name = "ResponsiveScale"
     responsiveScale.Parent = mainFrame
 
-    local function clampWindowPosition(centerX, centerY, useFullHeight)
+    local function clampWindowPosition(centerX, topY)
         local viewport = getUIViewport()
-        local height = (useFullHeight == nil and not isMinimized or useFullHeight) and WIN_HEIGHT or TITLE_HEIGHT
         local halfW = WIN_WIDTH * windowScale * 0.5
-        local halfH = height * windowScale * 0.5
         local current = mainFrame.Position
         centerX = centerX or viewport.X * current.X.Scale + current.X.Offset
-        centerY = centerY or viewport.Y * current.Y.Scale + current.Y.Offset
+        topY = topY or viewport.Y * current.Y.Scale + current.Y.Offset
         mainFrame.Position = UDim2.fromOffset(
             clampToRange(centerX, halfW + 12, viewport.X - halfW - 12),
-            clampToRange(centerY, halfH + 48, viewport.Y - halfH - 12)
+            clampToRange(topY, 48, viewport.Y - WIN_HEIGHT * windowScale - 12)
         )
     end
 
+    local positionedInitially = false
     local function updateResponsiveScale()
         local viewport = getUIViewport()
         windowScale = math.max(0.1, math.min(1,
             (viewport.X - 24) / WIN_WIDTH,
             (viewport.Y - 60) / WIN_HEIGHT))
         responsiveScale.Scale = windowScale
+        if not positionedInitially then
+            mainFrame.Position = UDim2.fromOffset(viewport.X * 0.5, (viewport.Y - WIN_HEIGHT * windowScale) * 0.5)
+            positionedInitially = true
+        end
         clampWindowPosition()
     end
     local cameraViewportConnection
@@ -2995,21 +2998,13 @@ local function buildNativeUI()
     bodyContainer.BackgroundTransparency = 1
     bodyContainer.Parent = mainFrame
 
-    -- Preserve the rendered top edge even if the user toggles during an animation.
+    -- The frame is top-anchored, so changing its height never moves the title bar.
     local windowTween = nil
     local function setWindowMinimized(nextMinimized)
         if isMinimized == nextMinimized then return end
 
-        local viewport = getUIViewport()
-        local current = mainFrame.Position
-        local centerX = viewport.X * current.X.Scale + current.X.Offset
-        local currentTop = mainFrame.AbsolutePosition.Y
         if windowTween then windowTween:Cancel() end
         local newHeight = nextMinimized and TITLE_HEIGHT or WIN_HEIGHT
-        local targetHalfW = WIN_WIDTH * windowScale * 0.5
-        local targetHalfH = newHeight * windowScale * 0.5
-        local targetCenterX = clampToRange(centerX, targetHalfW + 12, viewport.X - targetHalfW - 12)
-        local targetCenterY = clampToRange(currentTop + targetHalfH, targetHalfH + 48, viewport.Y - targetHalfH - 12)
 
         isMinimized = nextMinimized
         minBtn.Text = isMinimized and "+" or "-"
@@ -3021,7 +3016,6 @@ local function buildNativeUI()
 
         windowTween = tweenGui(mainFrame, {
             Size = UDim2.fromOffset(WIN_WIDTH, newHeight),
-            Position = UDim2.fromOffset(targetCenterX, targetCenterY),
         }, 0.22, Enum.EasingStyle.Quart)
     end
 
