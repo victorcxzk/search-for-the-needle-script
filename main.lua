@@ -1,5 +1,5 @@
 --[[
-    SEARCH FOR THE NEEDLE - ULTIMATE AUTOMATION HUB v6.4 PRO
+    SEARCH FOR THE NEEDLE - ULTIMATE AUTOMATION HUB v6.5 PRO
     Forensically Engineered from Luau Decompiler Bytecode Dump
     - Exact Multi-Grab Batching using LocalPlayer:GetAttribute("HayGrabCount") & getGrabCandidates
     - Rainbow / RGB Straw Priority via Neon, Material, and Config.isRainbow(hayId)
@@ -130,7 +130,7 @@ else
     GAME_MODE_NAME = "Place " .. tostring(CURRENT_PLACE_ID)
 end
 local CURRENT_PLACE_NAME = GAME_MODE_NAME
-local SCRIPT_VERSION = "6.4"
+local SCRIPT_VERSION = "6.5"
 local CurrentContextMode = IS_LOBBY and "Lobby" or "Match"
 
 -- Require game Config if available for exact mathematical rainbow calculations
@@ -2727,6 +2727,10 @@ local function buildNativeUI()
 
     clearUIConnections()
     if GlobalScreenGui then GlobalScreenGui:Destroy() end
+    if FloatingButtonGui then
+        FloatingButtonGui:Destroy()
+        FloatingButtonGui = nil
+    end
 
     local screenGui = Instance.new("ScreenGui")
     screenGui.Name = "NeedleHubNative"
@@ -2866,52 +2870,11 @@ local function buildNativeUI()
     titleLabel.TextXAlignment = Enum.TextXAlignment.Left
     titleLabel.Parent = titleBar
 
-    -- Context is rendered as quiet typography, not competing badges.
-    local verPill = Instance.new("Frame")
-    verPill.Size = UDim2.fromOffset(66, 20)
-    verPill.Position = UDim2.new(0, 174, 0.5, -10)
-    verPill.BackgroundTransparency = 1
-    verPill.BorderSizePixel = 0
-    verPill.Parent = titleBar
-    local verLbl = Instance.new("TextLabel")
-    verLbl.Size = UDim2.fromScale(1, 1)
-    verLbl.BackgroundTransparency = 1
-    verLbl.Text = "v" .. tostring(SCRIPT_VERSION)
-    verLbl.TextColor3 = UI_THEME.muted
-    verLbl.Font = Enum.Font.GothamMedium
-    verLbl.TextSize = 11
-    verLbl.Parent = verPill
-
-    -- Match vs lobby context
-    local statusPill = Instance.new("Frame")
-    statusPill.Size = UDim2.fromOffset(112, 20)
-    statusPill.Position = UDim2.new(0, 248, 0.5, -10)
-    statusPill.BackgroundTransparency = 1
-    statusPill.BorderSizePixel = 0
-    statusPill.Parent = titleBar
-    local statusDot = Instance.new("Frame")
-    statusDot.Size = UDim2.fromOffset(6, 6)
-    statusDot.Position = UDim2.new(0, 7, 0.5, -3)
-    statusDot.BackgroundColor3 = UI_THEME.accent
-    statusDot.BorderSizePixel = 0
-    statusDot.Parent = statusPill
-    local sdc = Instance.new("UICorner") sdc.CornerRadius = UDim.new(1, 0) sdc.Parent = statusDot
-    local statusLbl = Instance.new("TextLabel")
-    statusLbl.Size = UDim2.new(1, -16, 1, 0)
-    statusLbl.Position = UDim2.fromOffset(16, 0)
-    statusLbl.BackgroundTransparency = 1
-    statusLbl.Text = (CurrentContextMode == "Match") and "PARTIDA" or "LOBBY"
-    statusLbl.TextColor3 = UI_THEME.muted
-    statusLbl.Font = Enum.Font.GothamMedium
-    statusLbl.TextSize = 11
-    statusLbl.TextXAlignment = Enum.TextXAlignment.Left
-    statusLbl.Parent = statusPill
-
     -- Live account balance; the authoritative replicated Data service is used.
     local gemPill = Instance.new("Frame")
     gemPill.Name = "GemBalance"
     gemPill.Size = UDim2.fromOffset(112, 22)
-    gemPill.Position = UDim2.new(0, 370, 0.5, -11)
+    gemPill.Position = UDim2.new(0, 174, 0.5, -11)
     gemPill.BackgroundColor3 = UI_THEME.accentDark
     gemPill.BackgroundTransparency = 0.2
     gemPill.BorderSizePixel = 0
@@ -2934,24 +2897,6 @@ local function buildNativeUI()
             gemLabel.Text = "GEMAS  " .. formatNumber(getGemBalance())
             task.wait(0.5)
         end
-    end)
-
-    -- Re-center / Reset Position Button
-    local centerBtn = Instance.new("TextButton")
-    centerBtn.Size = UDim2.fromOffset(30, 30)
-    centerBtn.Position = UDim2.new(1, -112, 0.5, -15)
-    centerBtn.BackgroundColor3 = UI_THEME.card
-    centerBtn.Text = "◎"
-    centerBtn.TextColor3 = UI_THEME.muted
-    centerBtn.Font = Enum.Font.GothamBold
-    centerBtn.TextSize = 13
-    centerBtn.AutoButtonColor = false
-    centerBtn.Parent = titleBar
-    local ccCorner = Instance.new("UICorner") ccCorner.CornerRadius = UDim.new(0, 8) ccCorner.Parent = centerBtn
-    centerBtn.MouseButton1Click:Connect(function()
-        local viewport = getUIViewport()
-        clampWindowPosition(viewport.X * 0.5, viewport.Y * 0.5)
-        addLog("info", "Janela recentralizada na tela.")
     end)
 
     -- Minimize Button
@@ -2979,9 +2924,6 @@ local function buildNativeUI()
     closeBtn.AutoButtonColor = false
     closeBtn.Parent = titleBar
     local closeCorner = Instance.new("UICorner") closeCorner.CornerRadius = UDim.new(0, 8) closeCorner.Parent = closeBtn
-    closeBtn.MouseButton1Click:Connect(function()
-        mainFrame.Visible = false
-    end)
 
     -- Container for Tabs & Content
     local bodyContainer = Instance.new("Frame")
@@ -2991,18 +2933,43 @@ local function buildNativeUI()
     bodyContainer.BackgroundTransparency = 1
     bodyContainer.Parent = mainFrame
 
-    minBtn.MouseButton1Click:Connect(function()
-        isMinimized = not isMinimized
+    -- Preserve the top edge while collapsing, so the title bar stays exactly where it was.
+    local function setWindowMinimized(nextMinimized)
+        if isMinimized == nextMinimized then return end
+
+        local viewport = getUIViewport()
+        local current = mainFrame.Position
+        local centerX = viewport.X * current.X.Scale + current.X.Offset
+        local centerY = viewport.Y * current.Y.Scale + current.Y.Offset
+        local oldHeight = isMinimized and TITLE_HEIGHT or WIN_HEIGHT
+        local newHeight = nextMinimized and TITLE_HEIGHT or WIN_HEIGHT
+        local currentTop = centerY - oldHeight * windowScale * 0.5
+        local targetHalfW = WIN_WIDTH * windowScale * 0.5
+        local targetHalfH = newHeight * windowScale * 0.5
+        local targetCenterX = clampToRange(centerX, targetHalfW + 12, viewport.X - targetHalfW - 12)
+        local targetCenterY = clampToRange(currentTop + targetHalfH, targetHalfH + 48, viewport.Y - targetHalfH - 12)
+
+        isMinimized = nextMinimized
         minBtn.Text = isMinimized and "+" or "-"
         if isMinimized then
-            tweenGui(mainFrame, {Size = UDim2.fromOffset(WIN_WIDTH, TITLE_HEIGHT)}, 0.2, Enum.EasingStyle.Quart)
             bodyContainer.Visible = false
-            clampWindowPosition()
         else
             bodyContainer.Visible = true
-            clampWindowPosition(nil, nil, true)
-            tweenGui(mainFrame, {Size = UDim2.fromOffset(WIN_WIDTH, WIN_HEIGHT)}, 0.2, Enum.EasingStyle.Quart)
         end
+
+        tweenGui(mainFrame, {
+            Size = UDim2.fromOffset(WIN_WIDTH, newHeight),
+            Position = UDim2.fromOffset(targetCenterX, targetCenterY),
+        }, 0.22, Enum.EasingStyle.Quart)
+    end
+
+    minBtn.MouseButton1Click:Connect(function()
+        setWindowMinimized(not isMinimized)
+    end)
+
+    -- Close means collapse in place; the compact bar is the way back.
+    closeBtn.MouseButton1Click:Connect(function()
+        setWindowMinimized(true)
     end)
 
     -- Viewport Clamped Window Dragging
@@ -4028,19 +3995,9 @@ local function buildNativeUI()
     if setTab then
         addNativeSection(setTab, "Atualizacoes")
 
-        local gameWatcherCard = addNativeParagraph(setTab, "Versao do jogo",
-            string.format("Place: %s | PlaceId: %s\nGame Version: v%s | Servidor Ativo",
-                tostring(GAME_MODE_NAME), tostring(game.PlaceId), tostring(game.PlaceVersion)))
-
-        local scriptVerCard = addNativeParagraph(setTab, "Versao do hub",
-            string.format("Versao Instalada: v%s PRO\nStatus GitHub: %s", SCRIPT_VERSION, ScriptUpdateNotice))
-
         addNativeButton(setTab, "Verificar Atualizacoes no GitHub", function()
-            scriptVerCard.Text = "Conectando ao GitHub para verificar versao..."
             checkForScriptUpdates(function(notice, available)
-                if scriptVerCard and scriptVerCard.Parent then
-                    scriptVerCard.Text = string.format("Versao Instalada: v%s PRO\nStatus GitHub: %s", SCRIPT_VERSION, notice)
-                end
+                addLog(available and "warn" or "info", notice)
             end)
         end)
 
@@ -4056,14 +4013,6 @@ local function buildNativeUI()
         end, true)
     end
 
-    -- Setup Floating Button to toggle main frame visibility
-    createFloatingToggleButton(function()
-        mainFrame.Visible = not mainFrame.Visible
-        if mainFrame.Visible then
-            updateResponsiveScale()
-            clampWindowPosition()
-        end
-    end)
 end
 
 -- Background Watcher: Game PlaceVersion Update Detection

@@ -1,7 +1,7 @@
 {
-  "version": "6.4",
-  "versionNumber": 64,
+  "version": "6.5",
+  "versionNumber": 65,
   "gameCompatibility": "Lobby/Farmhouse v1068; Basement PlaceVersion 510 (dump 2026-09-13)",
   "releaseDate": "2026-09-14",
-  "releaseNotes": "Redesigns the native UI with frosted graphite surfaces and clearer controls; keeps the window and launcher on-screen when dragged, reopened, restored, or resized."
+  "releaseNotes": "Simplifies the UI header, removes redundant status and diagnostics cards, and makes close collapse the window in place with no separate floating launcher."
 }
