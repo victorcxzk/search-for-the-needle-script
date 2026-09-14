@@ -1,5 +1,5 @@
 --[[
-    SEARCH FOR THE NEEDLE - ULTIMATE AUTOMATION HUB v6.6 PRO
+    SEARCH FOR THE NEEDLE - ULTIMATE AUTOMATION HUB v6.7 PRO
     Forensically Engineered from Luau Decompiler Bytecode Dump
     - Exact Multi-Grab Batching using LocalPlayer:GetAttribute("HayGrabCount") & getGrabCandidates
     - Rainbow / RGB Straw Priority via Neon, Material, and Config.isRainbow(hayId)
@@ -130,7 +130,7 @@ else
     GAME_MODE_NAME = "Place " .. tostring(CURRENT_PLACE_ID)
 end
 local CURRENT_PLACE_NAME = GAME_MODE_NAME
-local SCRIPT_VERSION = "6.6"
+local SCRIPT_VERSION = "6.7"
 local CurrentContextMode = IS_LOBBY and "Lobby" or "Match"
 
 -- Require game Config if available for exact mathematical rainbow calculations
@@ -2674,37 +2674,69 @@ local function createFloatingToggleButton(toggleCallback)
 end
 
 -- Version & GitHub Update Status Store
-local RemoteScriptVersion = SCRIPT_VERSION
+local RemoteScriptVersion = nil
 local ScriptUpdateAvailable = false
-local ScriptUpdateNotice = "Verificando versao no GitHub..."
+local ScriptUpdateNotice = "Aguardando consulta ao GitHub"
+local ScriptUpdateRequestId = 0
+
+local function compareHubVersions(remote, installed)
+    local remoteParts, installedParts = {}, {}
+    for value in tostring(remote):gmatch("%d+") do table.insert(remoteParts, tonumber(value)) end
+    for value in tostring(installed):gmatch("%d+") do table.insert(installedParts, tonumber(value)) end
+    if #remoteParts == 0 or #installedParts == 0 then return nil end
+    for index = 1, math.max(#remoteParts, #installedParts) do
+        local remotePart = remoteParts[index] or 0
+        local installedPart = installedParts[index] or 0
+        if remotePart > installedPart then return 1 end
+        if remotePart < installedPart then return -1 end
+    end
+    return 0
+end
 
 local function checkForScriptUpdates(onFinished)
+    ScriptUpdateRequestId = ScriptUpdateRequestId + 1
+    local requestId = ScriptUpdateRequestId
+    ScriptUpdateNotice = "Consultando GitHub..."
     task.spawn(function()
         local success, res = pcall(function()
-            return game:HttpGet("https://raw.githubusercontent.com/victorcxzk/search-for-the-needle-script/master/version.json")
+            local cacheKey = tostring(os.time()) .. "-" .. tostring(math.floor(os.clock() * 1000))
+            return game:HttpGet("https://raw.githubusercontent.com/victorcxzk/search-for-the-needle-script/master/version.json?cb=" .. cacheKey)
         end)
-        if success and res and #res > 0 then
+        local remoteVersion = nil
+        local notice = nil
+        local available = false
+        if success and type(res) == "string" and #res > 0 then
             local HttpService = safeService("HttpService")
             local parsed = nil
             pcall(function()
                 if HttpService then parsed = HttpService:JSONDecode(res) end
             end)
-            if parsed and parsed.version then
-                RemoteScriptVersion = tostring(parsed.version)
-                if RemoteScriptVersion ~= SCRIPT_VERSION then
-                    ScriptUpdateAvailable = true
-                    ScriptUpdateNotice = "Nova versao disponivel! (v" .. RemoteScriptVersion .. ")"
-                    addLog("warn", "ATUALIZACAO DISPONIVEL: v" .. RemoteScriptVersion .. " no GitHub! (Versao atual: v" .. SCRIPT_VERSION .. ")")
+            if type(parsed) == "table" and parsed.version then
+                remoteVersion = tostring(parsed.version)
+                local comparison = compareHubVersions(remoteVersion, SCRIPT_VERSION)
+                if comparison == 1 then
+                    available = true
+                    notice = "Nova versao disponivel"
+                elseif comparison == 0 then
+                    notice = "Atualizada"
+                elseif comparison == -1 then
+                    notice = "GitHub mostra versao anterior"
                 else
-                    ScriptUpdateAvailable = false
-                    ScriptUpdateNotice = "Script 100% Atualizado (v" .. SCRIPT_VERSION .. " PRO)"
-                    addLog("info", "Script esta na versao mais recente (v" .. SCRIPT_VERSION .. ")")
+                    notice = "Versao do GitHub invalida"
                 end
+            else
+                notice = "Resposta invalida do GitHub"
             end
         else
-            ScriptUpdateNotice = "v" .. SCRIPT_VERSION .. " (Nao foi possivel conectar ao GitHub)"
+            notice = "Falha ao consultar GitHub"
         end
-        if onFinished then pcall(onFinished, ScriptUpdateNotice, ScriptUpdateAvailable) end
+        if requestId ~= ScriptUpdateRequestId then return end
+        RemoteScriptVersion = remoteVersion
+        ScriptUpdateAvailable = available
+        ScriptUpdateNotice = notice
+        addLog((available or not remoteVersion) and "warn" or "info", "Versao instalada v" .. SCRIPT_VERSION .. "; GitHub " ..
+            (remoteVersion and ("v" .. remoteVersion) or "indisponivel") .. ": " .. notice)
+        if onFinished then pcall(onFinished, notice, available, remoteVersion) end
     end)
 end
 
@@ -2858,11 +2890,23 @@ local function buildNativeUI()
     titleLabel.TextXAlignment = Enum.TextXAlignment.Left
     titleLabel.Parent = titleBar
 
+    local versionLabel = Instance.new("TextLabel")
+    versionLabel.Name = "InstalledVersion"
+    versionLabel.Size = UDim2.fromOffset(54, 22)
+    versionLabel.Position = UDim2.new(0, 174, 0.5, -11)
+    versionLabel.BackgroundTransparency = 1
+    versionLabel.Text = "v" .. SCRIPT_VERSION
+    versionLabel.TextColor3 = UI_THEME.muted
+    versionLabel.Font = Enum.Font.GothamMedium
+    versionLabel.TextSize = 12
+    versionLabel.TextXAlignment = Enum.TextXAlignment.Left
+    versionLabel.Parent = titleBar
+
     -- Live account balance; the authoritative replicated Data service is used.
     local gemPill = Instance.new("Frame")
     gemPill.Name = "GemBalance"
     gemPill.Size = UDim2.fromOffset(112, 22)
-    gemPill.Position = UDim2.new(0, 174, 0.5, -11)
+    gemPill.Position = UDim2.new(0, 238, 0.5, -11)
     gemPill.BackgroundColor3 = UI_THEME.accentDark
     gemPill.BackgroundTransparency = 0.2
     gemPill.BorderSizePixel = 0
@@ -2921,17 +2965,17 @@ local function buildNativeUI()
     bodyContainer.BackgroundTransparency = 1
     bodyContainer.Parent = mainFrame
 
-    -- Preserve the top edge while collapsing, so the title bar stays exactly where it was.
+    -- Preserve the rendered top edge even if the user toggles during an animation.
+    local windowTween = nil
     local function setWindowMinimized(nextMinimized)
         if isMinimized == nextMinimized then return end
 
         local viewport = getUIViewport()
         local current = mainFrame.Position
         local centerX = viewport.X * current.X.Scale + current.X.Offset
-        local centerY = viewport.Y * current.Y.Scale + current.Y.Offset
-        local oldHeight = isMinimized and TITLE_HEIGHT or WIN_HEIGHT
+        local currentTop = mainFrame.AbsolutePosition.Y
+        if windowTween then windowTween:Cancel() end
         local newHeight = nextMinimized and TITLE_HEIGHT or WIN_HEIGHT
-        local currentTop = centerY - oldHeight * windowScale * 0.5
         local targetHalfW = WIN_WIDTH * windowScale * 0.5
         local targetHalfH = newHeight * windowScale * 0.5
         local targetCenterX = clampToRange(centerX, targetHalfW + 12, viewport.X - targetHalfW - 12)
@@ -2945,7 +2989,7 @@ local function buildNativeUI()
             bodyContainer.Visible = true
         end
 
-        tweenGui(mainFrame, {
+        windowTween = tweenGui(mainFrame, {
             Size = UDim2.fromOffset(WIN_WIDTH, newHeight),
             Position = UDim2.fromOffset(targetCenterX, targetCenterY),
         }, 0.22, Enum.EasingStyle.Quart)
@@ -3984,16 +4028,47 @@ local function buildNativeUI()
     if setTab then
         addNativeSection(setTab, "Atualizacoes")
 
-        addNativeButton(setTab, "Verificar Atualizacoes no GitHub", function()
-            checkForScriptUpdates(function(notice, available)
-                addLog(available and "warn" or "info", notice)
+        local versionCard = addNativeParagraph(setTab, "Versao do hub",
+            "Instalada: v" .. SCRIPT_VERSION .. "\nGitHub: aguardando consulta")
+        local checkButton
+        local function refreshVersionCard()
+            versionCard.Text = "Instalada: v" .. SCRIPT_VERSION .. "\nGitHub: verificando..."
+            if checkButton then checkButton.Text = "Verificando GitHub..." end
+            checkForScriptUpdates(function(notice, available, remoteVersion)
+                if not versionCard.Parent then return end
+                local githubText = remoteVersion and ("v" .. remoteVersion) or "indisponivel"
+                versionCard.Text = "Instalada: v" .. SCRIPT_VERSION .. "\nGitHub: " .. githubText .. " - " .. notice
+                if checkButton and checkButton.Parent then
+                    checkButton.Text = remoteVersion and "Verificar novamente" or "Tentar novamente"
+                end
             end)
-        end)
+        end
+        checkButton = addNativeButton(setTab, "Verificar versao no GitHub", refreshVersionCard)
+        refreshVersionCard()
 
         addNativeButton(setTab, "Atualizar / Recarregar Script (Auto-Download)", function()
-            addLog("info", "Recarregando script diretamente do GitHub...")
-            unloadHub()
-            loadstring(game:HttpGet("https://raw.githubusercontent.com/victorcxzk/search-for-the-needle-script/master/main.lua?cb=" .. tostring(os.time())))()
+            versionCard.Text = "Instalada: v" .. SCRIPT_VERSION .. "\nBaixando script do GitHub..."
+            local downloadOk, source = pcall(function()
+                return game:HttpGet("https://raw.githubusercontent.com/victorcxzk/search-for-the-needle-script/master/main.lua?cb=" .. tostring(os.time()))
+            end)
+            if not downloadOk or type(source) ~= "string" or #source == 0 then
+                versionCard.Text = "Instalada: v" .. SCRIPT_VERSION .. "\nFalha ao baixar. Tente novamente."
+                return
+            end
+            local loader, compileError = loadstring(source)
+            if not loader then
+                versionCard.Text = "Instalada: v" .. SCRIPT_VERSION .. "\nFalha ao preparar a atualizacao."
+                addLog("error", tostring(compileError))
+                return
+            end
+            versionCard.Text = "Instalada: v" .. SCRIPT_VERSION .. "\nAbrindo versao baixada..."
+            local runOk, runError = pcall(loader)
+            if not runOk then
+                addLog("error", "Falha ao abrir script baixado: " .. tostring(runError))
+                if versionCard.Parent then
+                    versionCard.Text = "Instalada: v" .. SCRIPT_VERSION .. "\nFalha ao abrir a atualizacao."
+                end
+            end
         end, true)
 
         addNativeSection(setTab, "Sessao")
@@ -4045,9 +4120,6 @@ task.spawn(function()
         end
     end
 end)
-
--- Check GitHub script updates on load
-checkForScriptUpdates()
 
 -- Initialize UI & Apply Camera Snap
 local okUi, errUi = pcall(buildNativeUI)
