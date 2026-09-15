@@ -1,5 +1,5 @@
 --[[
-    SEARCH FOR THE NEEDLE - ULTIMATE AUTOMATION HUB v6.15 PRO
+    SEARCH FOR THE NEEDLE - ULTIMATE AUTOMATION HUB v6.16 PRO
     Forensically Engineered from Luau Decompiler Bytecode Dump
     - Exact Multi-Grab Batching using LocalPlayer:GetAttribute("HayGrabCount") & getGrabCandidates
     - Rare / RGB priority via HayMutation and the game's value multipliers
@@ -130,17 +130,54 @@ else
     GAME_MODE_NAME = "Place " .. tostring(CURRENT_PLACE_ID)
 end
 local CURRENT_PLACE_NAME = GAME_MODE_NAME
-local SCRIPT_VERSION = "6.15"
+local SCRIPT_VERSION = "6.16"
 local CurrentContextMode = IS_LOBBY and "Lobby" or "Match"
 
 -- Require game Config if available for exact mathematical rainbow calculations
 local HaystackConfig = nil
+local HaystackSurface = nil
 pcall(function()
     local nh = ReplicatedStorage:FindFirstChild("NeedleHaystack")
     if nh and nh:FindFirstChild("Config") then
         HaystackConfig = require(nh.Config)
     end
+    if nh and nh:FindFirstChild("Surface") then
+        HaystackSurface = require(nh.Surface)
+    end
 end)
+
+-- Surface is the same client-side depth grid used by the game to render dug
+-- craters. It gives us an authoritative local progress value instead of using
+-- time spent at a teleport as a proxy for progress.
+local function getDigDepthFraction(worldPosition)
+    if typeof(worldPosition) ~= "Vector3" or not HaystackSurface
+        or type(HaystackSurface.digAt) ~= "function" then
+        return nil
+    end
+    local center = HaystackConfig and HaystackConfig.PILE_CENTER
+    local maxDepth = tonumber(HaystackConfig and HaystackConfig.DIG_MAX_DEPTH)
+    if typeof(center) ~= "Vector3" or not maxDepth or maxDepth <= 0 then return nil end
+    local ok, depth = pcall(HaystackSurface.digAt,
+        worldPosition.X - center.X, worldPosition.Z - center.Z)
+    if not ok or type(depth) ~= "number" then return nil end
+    return math.clamp(depth / maxDepth, 0, 1)
+end
+
+local function getHayRoundProgress()
+    local folder = ReplicatedStorage and ReplicatedStorage:FindFirstChild("NeedleHaystack")
+    if not folder then return nil, nil, nil end
+    local remaining = tonumber(folder:GetAttribute("RemainingHay"))
+    local total = tonumber(folder:GetAttribute("TotalHay"))
+    if not remaining or not total or total <= 0 then return nil, remaining, total end
+    return math.clamp(1 - remaining / total, 0, 1), remaining, total
+end
+
+local FarmProgressState = {
+    localDepth = nil,
+    target = "aguardando",
+    sector = nil,
+    cycle = 1,
+}
 
 local GemConfig = nil
 pcall(function()
@@ -459,6 +496,8 @@ local Landmarks = {
     HayCenter = Vector3.new(-190.0, 4.0, 45.0),
     NeedleCFrame = nil,
     TargetNeedleHayId = nil,
+    TargetNeedleSlot = nil,
+    TargetNeedleGeneration = nil,
 }
 
 local function scanExactLandmarks()
@@ -507,12 +546,28 @@ end
 
 scanExactLandmarks()
 
+local function cacheNeedleSnapshot(snapshot)
+    if type(snapshot) ~= "table" or type(snapshot.needleHayId) ~= "number" then return end
+    Landmarks.TargetNeedleHayId = snapshot.needleHayId
+    Landmarks.TargetNeedleSlot = nil
+    Landmarks.TargetNeedleGeneration = nil
+    if type(snapshot.activeIds) ~= "table" or type(snapshot.activeSlots) ~= "table" then return end
+    for index, hayId in ipairs(snapshot.activeIds) do
+        if hayId == snapshot.needleHayId then
+            Landmarks.TargetNeedleSlot = tonumber(snapshot.activeSlots[index])
+            if type(snapshot.activeGenerations) == "table" then
+                Landmarks.TargetNeedleGeneration = tonumber(snapshot.activeGenerations[index]) or 0
+            end
+            break
+        end
+    end
+end
+
 if IS_GAMEPLAY and Remotes.GetHayState then
     local snapshotThread = task.spawn(function()
         local ok, snapshot = pcall(function() return Remotes.GetHayState:InvokeServer() end)
-        if IsHubLoaded and ok and type(snapshot) == "table"
-            and type(snapshot.needleHayId) == "number" and Landmarks.TargetNeedleHayId == nil then
-            Landmarks.TargetNeedleHayId = snapshot.needleHayId
+        if IsHubLoaded and ok then
+            cacheNeedleSnapshot(snapshot)
         end
     end)
     table.insert(HubThreads, snapshotThread)
@@ -522,7 +577,16 @@ if Remotes.NeedleTargetChanged then
     local conn = Remotes.NeedleTargetChanged.OnClientEvent:Connect(function(targetArg)
         if typeof(targetArg) == "number" then
             Landmarks.TargetNeedleHayId = targetArg
+            Landmarks.TargetNeedleSlot = nil
+            Landmarks.TargetNeedleGeneration = nil
             addLog("info", "Needle target HayId: " .. tostring(targetArg))
+            if Remotes.GetHayState then
+                local refreshThread = task.spawn(function()
+                    local ok, snapshot = pcall(function() return Remotes.GetHayState:InvokeServer() end)
+                    if IsHubLoaded and ok then cacheNeedleSnapshot(snapshot) end
+                end)
+                table.insert(HubThreads, refreshThread)
+            end
         elseif typeof(targetArg) == "CFrame" then
             Landmarks.NeedleCFrame = targetArg
             addLog("info", "Needle target CFrame updated")
@@ -920,8 +984,19 @@ local function getToolStatusSummary()
     local dOwned = isToolOwned("Drone") and (LocalPlayer:GetAttribute("DroneDeployed") == true and "ativo" or "sim") or "nao"
 
     local movementMode = HubState.NoTeleportMode and "sem teleporte" or "autonomo com teleporte"
-    return string.format("Modo: %s | Em uso: %s (slot %d) | Melhor: %s\nAspirador: %s | Forquilha: %s | TNT: %s | Drone: %s",
-        movementMode, curName, curSlot, bestName, vOwned, pOwned, tOwned, dOwned)
+    local cleared, remaining, total = getHayRoundProgress()
+    local globalText = cleared and string.format("%.3f%% (%s/%s restantes)",
+        cleared * 100, formatNumber(remaining), formatNumber(total)) or "indisponivel"
+    local localText = FarmProgressState.localDepth
+        and string.format("%.0f%%", FarmProgressState.localDepth * 100) or "aguardando"
+    local targetText = FarmProgressState.target or "aguardando"
+    if FarmProgressState.sector then
+        targetText = targetText .. " S" .. tostring(FarmProgressState.sector)
+            .. "/C" .. tostring(FarmProgressState.cycle or 1)
+    end
+    return string.format("Modo: %s | Em uso: %s (slot %d) | Melhor: %s\nAspirador: %s | Forquilha: %s | TNT: %s | Drone: %s\nFeno removido: %s | Profundidade: %s (meta 75%%) | Alvo: %s",
+        movementMode, curName, curSlot, bestName, vOwned, pOwned, tOwned, dOwned,
+        globalText, localText, targetText)
 end
 
 local function getHayHeld()
@@ -1257,15 +1332,24 @@ local function getNearbyHayParts(origin, radius, maxParts)
 end
 
 -- Keep the chosen dig area stable while the player moves. The known needle
--- HayId is a hint for where to dig, not permission to collect the objective.
+-- HayId identifies where to excavate; objective collection still uses the
+-- server's normal reveal and PickHay("Objective") flow.
 local cachedNeedleHayId = nil
 local cachedNeedleHayPart = nil
+local cachedNeedleTargetPosition = nil
 local lastNeedleHayLookupAt = 0
 local digSequence = 0
 local lastDigHayId = nil
-local AUTO_FARM_CORNER_DWELL = 2.5
+local AUTO_FARM_MIN_DWELL = 2.5
+local AUTO_FARM_MAX_DWELL = 8
+local AUTO_FARM_SECTOR_COUNT = 16
+local AUTO_FARM_TARGET_DEPTH = math.clamp(
+    tonumber(HaystackConfig and HaystackConfig.NEEDLE_REVEAL_FRACTION) or 0.75, 0.1, 1)
 local autoFarmCornerPosition = nil
 local autoFarmCornerStartedAt = 0
+local autoFarmCornerSector = nil
+local autoFarmCornerMode = nil
+local autoFarmVisitedSectors = {}
 local hayGeometryFolder = nil
 local hayGeometryCenter = nil
 local hayGeometryMinY = nil
@@ -1279,7 +1363,10 @@ local function getKnownNeedleHayPart(haystack)
     if cachedNeedleHayId ~= hayId then
         cachedNeedleHayId = hayId
         cachedNeedleHayPart = nil
+        cachedNeedleTargetPosition = nil
         lastNeedleHayLookupAt = 0
+        table.clear(autoFarmVisitedSectors)
+        FarmProgressState.cycle = 1
     end
     if cachedNeedleHayPart and cachedNeedleHayPart.Parent == haystack
         and cachedNeedleHayPart:GetAttribute("HayId") == hayId then
@@ -1290,6 +1377,7 @@ local function getKnownNeedleHayPart(haystack)
     for _, part in ipairs(haystack:GetChildren()) do
         if part:IsA("BasePart") and part:GetAttribute("HayId") == hayId then
             cachedNeedleHayPart = part
+            cachedNeedleTargetPosition = part.Position
             return part
         end
     end
@@ -1317,7 +1405,14 @@ local function getHayGeometryCenter(haystack)
     hayGeometryFolder = haystack
     lastHayGeometryAt = os.clock()
     if count > 0 then
-        hayGeometryCenter = Vector3.new(sumX / count, sumY / count, sumZ / count)
+        local configuredCenter = HaystackConfig and HaystackConfig.PILE_CENTER
+        if typeof(configuredCenter) == "Vector3" then
+            -- The live centroid moves as hay disappears. Keep X/Z anchored to
+            -- the server's pile center so angular sectors never drift or repeat.
+            hayGeometryCenter = Vector3.new(configuredCenter.X, sumY / count, configuredCenter.Z)
+        else
+            hayGeometryCenter = Vector3.new(sumX / count, sumY / count, sumZ / count)
+        end
         hayGeometryMinY, hayGeometryMaxY = minY, maxY
         local midY = minY + (maxY - minY) * 0.5
         local upperRadius = 0
@@ -1329,7 +1424,7 @@ local function getHayGeometryCenter(haystack)
                 upperRadius = math.max(upperRadius, math.sqrt(dx * dx + dz * dz))
             end
         end
-        hayGeometryUpperRadius = upperRadius
+        hayGeometryUpperRadius = tonumber(HaystackConfig and HaystackConfig.PILE_RADIUS) or upperRadius
         Landmarks.HayCenter = hayGeometryCenter
     else
         hayGeometryCenter = nil
@@ -1338,11 +1433,16 @@ local function getHayGeometryCenter(haystack)
     return hayGeometryCenter, hayGeometryMinY, hayGeometryMaxY, hayGeometryUpperRadius
 end
 
-local function chooseSmartHayPart(candidates, origin, maxDistance, haystack)
+local function getFarmSector(position, center)
+    if typeof(position) ~= "Vector3" or typeof(center) ~= "Vector3" then return nil end
+    local angle = math.atan2(position.Z - center.Z, position.X - center.X)
+    local normalized = (angle + math.pi * 2) % (math.pi * 2)
+    return math.floor(normalized / (math.pi * 2) * AUTO_FARM_SECTOR_COUNT) + 1
+end
+
+local function chooseSmartHayPart(candidates, origin, maxDistance, haystack, respectCoverage)
     if not haystack then return nil end
     local center, minY, maxY, upperRadius = getHayGeometryCenter(haystack)
-    local needleHay = getKnownNeedleHayPart(haystack)
-    local digRadius = tonumber(HaystackConfig and HaystackConfig.NEEDLE_DIG_RADIUS) or 5.5
     local targetAngle = (digSequence * 2.399963229728653 + math.sin(digSequence * 1.618) * 0.17)
         % (math.pi * 2)
     local heightSpan = minY and maxY and (maxY - minY) or 0
@@ -1356,7 +1456,12 @@ local function chooseSmartHayPart(candidates, origin, maxDistance, haystack)
             and type(part:GetAttribute("HayId")) == "number" then
             local offset = part.Position - origin
             local distance = offset.Magnitude
-            if distance <= maxDistance and (heightSpan < 1.5 or part.Position.Y >= minimumDigY) then
+            local sector = getFarmSector(part.Position, center)
+            local depth = respectCoverage and getDigDepthFraction(part.Position) or nil
+            local alreadyCovered = respectCoverage and sector and autoFarmVisitedSectors[sector]
+            local deepEnough = respectCoverage and depth and depth >= AUTO_FARM_TARGET_DEPTH
+            if distance <= maxDistance and not alreadyCovered and not deepEnough
+                and (heightSpan < 1.5 or part.Position.Y >= minimumDigY) then
                 local score = -distance * 0.03 - math.abs(part.Position.Y - targetDigY) * 0.7
                 if part:GetAttribute("HayId") == lastDigHayId then score = score - 25 end
                 if center then
@@ -1365,16 +1470,6 @@ local function chooseSmartHayPart(candidates, origin, maxDistance, haystack)
                     local angle = math.atan2(dz, dx)
                     local angleError = math.abs((angle - targetAngle + math.pi) % (math.pi * 2) - math.pi)
                     score = score - math.abs(radius - rimTarget) * 3 - angleError * 7
-                end
-                if needleHay then
-                    local dx = part.Position.X - needleHay.Position.X
-                    local dz = part.Position.Z - needleHay.Position.Z
-                    local fromNeedle = math.sqrt(dx * dx + dz * dz)
-                    if fromNeedle <= digRadius then
-                        local angle = math.atan2(dz, dx)
-                        local angleError = math.abs((angle - targetAngle + math.pi) % (math.pi * 2) - math.pi)
-                        score = score + 35 - math.abs(fromNeedle - digRadius * 0.65) * 5 - angleError * 6
-                    end
                 end
                 if score > bestScore then chosen, bestScore = part, score end
             end
@@ -1403,33 +1498,160 @@ local function chooseLocalHayPart(candidates, origin, maxDistance, haystack)
     return chosen
 end
 
-local function clearAutoFarmCorner()
-    autoFarmCornerPosition = nil
-    autoFarmCornerStartedAt = 0
+local function markCurrentFarmSectorVisited()
+    if autoFarmCornerMode == "coverage" and autoFarmCornerSector then
+        autoFarmVisitedSectors[autoFarmCornerSector] = true
+    end
 end
 
-local function setAutoFarmCorner(position)
+local function clearAutoFarmCorner(markVisited)
+    if markVisited then markCurrentFarmSectorVisited() end
+    autoFarmCornerPosition = nil
+    autoFarmCornerStartedAt = 0
+    autoFarmCornerSector = nil
+    autoFarmCornerMode = nil
+    FarmProgressState.localDepth = nil
+    FarmProgressState.sector = nil
+    FarmProgressState.target = "aguardando"
+end
+
+local function setAutoFarmCorner(position, sector, mode)
     autoFarmCornerPosition = position
     autoFarmCornerStartedAt = os.clock()
+    autoFarmCornerSector = sector
+    autoFarmCornerMode = mode or "coverage"
+    FarmProgressState.localDepth = getDigDepthFraction(position)
+    FarmProgressState.sector = sector
+    FarmProgressState.target = autoFarmCornerMode == "needle"
+        and (IS_BASEMENT and "regiao da chave" or "regiao da agulha") or "cobertura"
+end
+
+local function isNeedleAlreadyRevealed()
+    local folder = ReplicatedStorage and ReplicatedStorage:FindFirstChild("NeedleHaystack")
+    if LocalPlayer:GetAttribute("NeedleOwned") == true then return true end
+    if folder and folder:GetAttribute("NeedleRevealed") ~= nil then
+        return folder:GetAttribute("NeedleRevealed") == true
+    end
+    return findVisibleNeedleObjective() ~= nil
+end
+
+local function getNeedleSlotAnchor()
+    local slot = Landmarks.TargetNeedleSlot
+    local center = HaystackConfig and HaystackConfig.PILE_CENTER
+    local rendered = tonumber(HaystackConfig and HaystackConfig.RENDERED_HAY)
+    local total = tonumber(HaystackConfig and HaystackConfig.TOTAL_HAY)
+    if not slot or typeof(center) ~= "Vector3" or not rendered or not total
+        or not HaystackSurface or type(HaystackSurface.slotPolar) ~= "function" then
+        return nil
+    end
+    local slotCount = math.min(rendered, total)
+    local ok, radiusFraction, angle = pcall(HaystackSurface.slotPolar, slot, slotCount, 11, 0)
+    if not ok or type(radiusFraction) ~= "number" or type(angle) ~= "number" then return nil end
+    local radius = radiusFraction * (tonumber(HaystackConfig.PILE_RADIUS) or 17)
+    local dx, dz = radius * math.cos(angle), radius * math.sin(angle)
+    local profileFraction = 0.5
+    if type(HaystackSurface.profileHeightFraction) == "function" then
+        local profileOk, profile = pcall(HaystackSurface.profileHeightFraction, radiusFraction)
+        if profileOk and type(profile) == "number" then profileFraction = profile end
+    end
+    local rawDepth = 0
+    if type(HaystackSurface.digAt) == "function" then
+        local depthOk, depth = pcall(HaystackSurface.digAt, dx, dz)
+        if depthOk and type(depth) == "number" then rawDepth = depth end
+    end
+    local y = center.Y + (tonumber(HaystackConfig.PILE_BASE_Y) or 0)
+        + (tonumber(HaystackConfig.PILE_HEIGHT) or 12) * profileFraction - rawDepth
+    return Vector3.new(center.X + dx, y, center.Z + dz)
+end
+
+local function getNeedleDigAnchor(haystack)
+    if isNeedleAlreadyRevealed() then return nil end
+    local targetPart = getKnownNeedleHayPart(haystack)
+    if targetPart then cachedNeedleTargetPosition = targetPart.Position end
+    if not cachedNeedleTargetPosition then
+        cachedNeedleTargetPosition = getNeedleSlotAnchor()
+    end
+    return cachedNeedleTargetPosition, targetPart
+end
+
+local function selectNeedleAreaHay(haystack, anchor, targetPart)
+    if targetPart and targetPart.Parent == haystack then return targetPart end
+    local digRadius = tonumber(HaystackConfig and HaystackConfig.NEEDLE_DIG_RADIUS) or 5.5
+    local nearby = getNearbyHayParts(anchor, digRadius, 0)
+    local chosen = chooseLocalHayPart(nearby, anchor, digRadius, haystack)
+    if chosen then return chosen end
+    -- Account for vertical settling after the original target strand disappears.
+    return chooseLocalHayPart(haystack:GetChildren(), anchor, digRadius * 1.5, haystack)
 end
 
 local function chooseAutoFarmHayPart(haystack, hrp, reach)
     if HubState.NoTeleportMode then
         clearAutoFarmCorner()
+        FarmProgressState.localDepth = getDigDepthFraction(hrp.Position)
+        FarmProgressState.target = "area do jogador"
         return chooseLocalHayPart(getNearbyHayParts(hrp.Position, reach, 0),
             hrp.Position, reach, haystack), false
     end
 
+    -- The replicated target HayId is authoritative. Once its rendered position
+    -- is observed, keep digging inside the game's local needle radius until the
+    -- objective is revealed instead of merely giving that region a score bonus.
+    local needleAnchor, targetPart = getNeedleDigAnchor(haystack)
+    if needleAnchor then
+        if autoFarmCornerMode ~= "needle"
+            or not autoFarmCornerPosition
+            or (autoFarmCornerPosition - needleAnchor).Magnitude > 0.5 then
+            clearAutoFarmCorner(true)
+            setAutoFarmCorner(needleAnchor, nil, "needle")
+        end
+        FarmProgressState.localDepth = getDigDepthFraction(needleAnchor)
+        local needleAreaTarget = selectNeedleAreaHay(haystack, needleAnchor, targetPart)
+        if needleAreaTarget then
+            local shouldTeleport = (needleAreaTarget.Position - hrp.Position).Magnitude > reach
+            return needleAreaTarget, shouldTeleport
+        end
+    elseif autoFarmCornerMode == "needle" then
+        clearAutoFarmCorner()
+    end
+
     local now = os.clock()
-    if autoFarmCornerPosition and now - autoFarmCornerStartedAt < AUTO_FARM_CORNER_DWELL then
+    if autoFarmCornerPosition and autoFarmCornerMode == "coverage" then
+        local elapsed = now - autoFarmCornerStartedAt
+        local depth = getDigDepthFraction(autoFarmCornerPosition)
+        FarmProgressState.localDepth = depth
         local localTarget = chooseLocalHayPart(getNearbyHayParts(hrp.Position, reach, 0),
             hrp.Position, reach, haystack)
-        if localTarget then return localTarget, false end
+        local stillNeedsDigging = depth and depth < AUTO_FARM_TARGET_DEPTH
+        if localTarget and (elapsed < AUTO_FARM_MIN_DWELL
+            or (stillNeedsDigging and elapsed < AUTO_FARM_MAX_DWELL)) then
+            return localTarget, false
+        end
+        -- No local hay, the reveal depth was reached, or the safety timeout
+        -- expired. Retire this sector for the remainder of the current cycle.
+        clearAutoFarmCorner(true)
     end
 
     digSequence = digSequence + 1
-    local nextTarget = chooseSmartHayPart(haystack:GetChildren(), hrp.Position, math.huge, haystack)
-    if nextTarget then setAutoFarmCorner(nextTarget.Position) end
+    local nextTarget = chooseSmartHayPart(haystack:GetChildren(), hrp.Position,
+        math.huge, haystack, true)
+    if not nextTarget then
+        -- Every still-viable upper-edge sector was covered. Only now begin a
+        -- fresh pass; this is what prevents the old same-corners loop.
+        table.clear(autoFarmVisitedSectors)
+        FarmProgressState.cycle = (FarmProgressState.cycle or 1) + 1
+        digSequence = digSequence + 1
+        nextTarget = chooseSmartHayPart(haystack:GetChildren(), hrp.Position,
+            math.huge, haystack, true)
+    end
+    if not nextTarget then
+        -- Surface data may be unavailable briefly during round synchronization.
+        nextTarget = chooseSmartHayPart(haystack:GetChildren(), hrp.Position,
+            math.huge, haystack, false)
+    end
+    if nextTarget then
+        local center = getHayGeometryCenter(haystack)
+        setAutoFarmCorner(nextTarget.Position, getFarmSector(nextTarget.Position, center), "coverage")
+    end
     return nextTarget, nextTarget ~= nil
 end
 
@@ -1448,6 +1670,14 @@ chooseTntTarget = function(hrp)
         end
         local rareTarget = chooseRareHayPart(feasibleRare, hrp.Position, 32)
         if rareTarget then return rareTarget.Position end
+    end
+    if not HubState.NoTeleportMode then
+        local needleAnchor = getNeedleDigAnchor(haystack)
+        local excavationTarget = needleAnchor or autoFarmCornerPosition
+        if excavationTarget and (excavationTarget - hrp.Position).Magnitude <= 32
+            and solveTntVelocity(origin, excavationTarget) then
+            return excavationTarget
+        end
     end
     local scanOrigin = hrp.Position + Vector3.new(0, 7, 0)
     local nearby = HubState.NoTeleportMode and getNearbyHayParts(hrp.Position, 32, 0)
@@ -1689,7 +1919,10 @@ local farmThread = task.spawn(function()
                         if not HubState.NoTeleportMode
                             and not isHayWithinReach(targetRgb, myPos, activeSlot) then
                             hrp.CFrame = CFrame.new(targetPos + Vector3.new(0, 0.6, 0))
-                            setAutoFarmCorner(targetPos)
+                            -- Rares bypass dwell/coverage. Drop the interrupted
+                            -- corner so it cannot make the next normal tick farm
+                            -- around this temporary rare teleport by mistake.
+                            clearAutoFarmCorner()
                             task.wait(0.04)
                         end
 
@@ -3744,7 +3977,9 @@ local function buildNativeUI()
             end)
 
         addNativeSection(farmTab, "Ferramentas detectadas", Color3.fromRGB(99, 102, 241))
-        local toolStatusLbl = addNativeParagraph(farmTab, "Status das ferramentas", getToolStatusSummary(), Color3.fromRGB(99, 102, 241))
+        local toolStatusLbl = addNativeParagraph(farmTab, "Ferramentas e escavacao", getToolStatusSummary(), Color3.fromRGB(99, 102, 241))
+        toolStatusLbl.Size = UDim2.new(1, -30, 0, 52)
+        toolStatusLbl.Parent.Size = UDim2.new(0.98, 0, 0, 88)
         task.spawn(function()
             while IsHubLoaded and toolStatusLbl and toolStatusLbl.Parent do
                 task.wait(1.2)

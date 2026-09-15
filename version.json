@@ -1,7 +1,7 @@
 {
-  "version": "6.15",
-  "versionNumber": 75,
+  "version": "6.16",
+  "versionNumber": 76,
   "gameCompatibility": "Lobby/Farmhouse v1068; Basement PlaceVersion 510 (dump 2026-09-13)",
   "releaseDate": "2026-09-14",
-  "releaseNotes": "Auto Farm now holds each normal hay corner for 2.5 seconds instead of teleporting after every vacuum tick or TNT action. Rare mutated strands bypass the corner dwell and are collected immediately."
+  "releaseNotes": "Auto Farm now reads the game's live dig-depth grid and global hay counters, locks onto the replicated needle/key region when its strand position is known, and rotates through 16 fixed upper-edge sectors without repeating one until a full coverage pass is complete. A sector is retired at the real 75% reveal depth, when empty, or after an 8-second safety limit; the in-game status card shows global and local excavation progress."
 }
