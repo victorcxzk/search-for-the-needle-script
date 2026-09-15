@@ -1,7 +1,7 @@
 {
-  "version": "6.14",
-  "versionNumber": 74,
+  "version": "6.15",
+  "versionNumber": 75,
   "gameCompatibility": "Lobby/Farmhouse v1068; Basement PlaceVersion 510 (dump 2026-09-13)",
   "releaseDate": "2026-09-14",
-  "releaseNotes": "Auto Farm now enables automatic teleporting as part of the same switch and prioritizes rare hay globally. The no-teleport harvesting path can also pick nearby hay at any height instead of requiring the upper rim."
+  "releaseNotes": "Auto Farm now holds each normal hay corner for 2.5 seconds instead of teleporting after every vacuum tick or TNT action. Rare mutated strands bypass the corner dwell and are collected immediately."
 }

@@ -1,5 +1,5 @@
 --[[
-    SEARCH FOR THE NEEDLE - ULTIMATE AUTOMATION HUB v6.14 PRO
+    SEARCH FOR THE NEEDLE - ULTIMATE AUTOMATION HUB v6.15 PRO
     Forensically Engineered from Luau Decompiler Bytecode Dump
     - Exact Multi-Grab Batching using LocalPlayer:GetAttribute("HayGrabCount") & getGrabCandidates
     - Rare / RGB priority via HayMutation and the game's value multipliers
@@ -130,7 +130,7 @@ else
     GAME_MODE_NAME = "Place " .. tostring(CURRENT_PLACE_ID)
 end
 local CURRENT_PLACE_NAME = GAME_MODE_NAME
-local SCRIPT_VERSION = "6.14"
+local SCRIPT_VERSION = "6.15"
 local CurrentContextMode = IS_LOBBY and "Lobby" or "Match"
 
 -- Require game Config if available for exact mathematical rainbow calculations
@@ -1179,7 +1179,6 @@ end
 
 -- 8.1 FAST BATCH AUTO-FARM ENGINE (FULL RGB HUNTING + MULTI-GRAB + AUTO-SELL)
 local isCurrentlySelling = false
-local recentlyAttemptedStrands = {}
 local cachedRainbowStrands = {}
 local lastRainbowScanAt = 0
 local lastNoTeleportSellAttemptAt = 0
@@ -1238,10 +1237,7 @@ local function chooseRareHayPart(candidates, origin, maxDistance)
         if part and part.Parent and part:IsA("BasePart") then
             local distance = (part.Position - origin).Magnitude
             local value = getRareHayMultiplier(part)
-            local hayId = part:GetAttribute("HayId")
-            local attempt = type(hayId) == "number" and recentlyAttemptedStrands[hayId] or nil
-            local coolingDown = attempt and attempt.count >= 3 and os.clock() - attempt.time < 2.5
-            if distance <= maxDistance and value > 1 and not coolingDown
+            if distance <= maxDistance and value > 1
                 and (value > bestValue or (value == bestValue and distance < bestDistance)) then
                 bestPart, bestValue, bestDistance = part, value, distance
             end
@@ -1267,6 +1263,9 @@ local cachedNeedleHayPart = nil
 local lastNeedleHayLookupAt = 0
 local digSequence = 0
 local lastDigHayId = nil
+local AUTO_FARM_CORNER_DWELL = 2.5
+local autoFarmCornerPosition = nil
+local autoFarmCornerStartedAt = 0
 local hayGeometryFolder = nil
 local hayGeometryCenter = nil
 local hayGeometryMinY = nil
@@ -1402,6 +1401,36 @@ local function chooseLocalHayPart(candidates, origin, maxDistance, haystack)
         end
     end
     return chosen
+end
+
+local function clearAutoFarmCorner()
+    autoFarmCornerPosition = nil
+    autoFarmCornerStartedAt = 0
+end
+
+local function setAutoFarmCorner(position)
+    autoFarmCornerPosition = position
+    autoFarmCornerStartedAt = os.clock()
+end
+
+local function chooseAutoFarmHayPart(haystack, hrp, reach)
+    if HubState.NoTeleportMode then
+        clearAutoFarmCorner()
+        return chooseLocalHayPart(getNearbyHayParts(hrp.Position, reach, 0),
+            hrp.Position, reach, haystack), false
+    end
+
+    local now = os.clock()
+    if autoFarmCornerPosition and now - autoFarmCornerStartedAt < AUTO_FARM_CORNER_DWELL then
+        local localTarget = chooseLocalHayPart(getNearbyHayParts(hrp.Position, reach, 0),
+            hrp.Position, reach, haystack)
+        if localTarget then return localTarget, false end
+    end
+
+    digSequence = digSequence + 1
+    local nextTarget = chooseSmartHayPart(haystack:GetChildren(), hrp.Position, math.huge, haystack)
+    if nextTarget then setAutoFarmCorner(nextTarget.Position) end
+    return nextTarget, nextTarget ~= nil
 end
 
 chooseTntTarget = function(hrp)
@@ -1657,8 +1686,10 @@ local farmThread = task.spawn(function()
                         local targetPos = targetRgb.Position
                         local rId = targetRgb:GetAttribute("HayId")
 
-                        if not HubState.NoTeleportMode then
+                        if not HubState.NoTeleportMode
+                            and not isHayWithinReach(targetRgb, myPos, activeSlot) then
                             hrp.CFrame = CFrame.new(targetPos + Vector3.new(0, 0.6, 0))
+                            setAutoFarmCorner(targetPos)
                             task.wait(0.04)
                         end
 
@@ -1667,35 +1698,18 @@ local farmThread = task.spawn(function()
                                 pcall(function() Remotes.PickDroppedHay:FireServer(targetRgb) end)
                             end
                         elseif rId then
-                            -- Track attempt
-                            local now = os.clock()
-                            if not recentlyAttemptedStrands[rId] then
-                                recentlyAttemptedStrands[rId] = {time = now, count = 1}
-                            else
-                                recentlyAttemptedStrands[rId].time = now
-                                recentlyAttemptedStrands[rId].count = recentlyAttemptedStrands[rId].count + 1
-                            end
-
                             if harvestWithEquippedTool(targetRgb) then
                                 lastDigHayId = rId
-                                digSequence = digSequence + 1
                             end
                         end
                     else
                         -- 3. NORMAL HAY HARVESTING (when 0 RGB straws remain on field)
                         if haystack then
                             local reach = getToolReach(activeSlot)
-                            local children = HubState.NoTeleportMode and getNearbyHayParts(myPos, reach, 0)
-                                or haystack:GetChildren()
-                            local primaryPart
-                            if HubState.NoTeleportMode then
-                                primaryPart = chooseLocalHayPart(children, myPos, reach, haystack)
-                            else
-                                primaryPart = chooseSmartHayPart(children, myPos, math.huge, haystack)
-                            end
+                            local primaryPart, shouldTeleport = chooseAutoFarmHayPart(haystack, hrp, reach)
 
                             if primaryPart then
-                                if not HubState.NoTeleportMode and (primaryPart.Position - myPos).Magnitude > 8 then
+                                if shouldTeleport and not HubState.NoTeleportMode then
                                     hrp.CFrame = CFrame.new(primaryPart.Position + Vector3.new(0, 0.6, 0))
                                     task.wait(0.04)
                                 end
@@ -1703,7 +1717,6 @@ local farmThread = task.spawn(function()
                                 local selectedHayId = primaryPart:GetAttribute("HayId")
                                 if harvestWithEquippedTool(primaryPart) then
                                     lastDigHayId = selectedHayId
-                                    digSequence = digSequence + 1
                                 end
                             elseif HubState.NoTeleportMode and os.clock() - lastNoReachNoticeAt >= 8 then
                                 lastNoReachNoticeAt = os.clock()
@@ -1751,7 +1764,7 @@ local tntThread = task.spawn(function()
                 local cd = math.max(serverCooldown, tonumber(HubState.TntInterval) or serverCooldown)
                 if (now - lastAutoTntThrow) >= cd and (maxCap - currentHay) >= 10 then
                     local target = chooseTntTarget(hrp)
-                    if target and throwTntAt(target) then digSequence = digSequence + 1 end
+                    if target then throwTntAt(target) end
                 end
             end
         end
@@ -3709,6 +3722,7 @@ local function buildNativeUI()
                 equipToolSlot(bestSlot, true)
             else
                 stopVacuumAutomation()
+                clearAutoFarmCorner()
             end
             addLog("info", val and "Auto Farm ligado: TP automatico, raros, melhor ferramenta, TNT, gemas e drone."
                 or "Auto Farm desligado.")
@@ -3754,7 +3768,7 @@ local function buildNativeUI()
             if hrp then
                 local target = chooseTntTarget(hrp)
                 if target then
-                    if throwTntAt(target) then digSequence = digSequence + 1 end
+                    throwTntAt(target)
                 else
                     addLog("info", "Nao ha feno no alcance real da TNT.")
                 end
