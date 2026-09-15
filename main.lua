@@ -1,5 +1,5 @@
 --[[
-    SEARCH FOR THE NEEDLE - ULTIMATE AUTOMATION HUB v6.23 PRO
+    SEARCH FOR THE NEEDLE - ULTIMATE AUTOMATION HUB v6.24 PRO
     Forensically Engineered from Luau Decompiler Bytecode Dump
     - Exact Multi-Grab Batching using LocalPlayer:GetAttribute("HayGrabCount") & getGrabCandidates
     - Rare / RGB priority via HayMutation and the game's value multipliers
@@ -131,7 +131,7 @@ else
     GAME_MODE_NAME = "Place " .. tostring(CURRENT_PLACE_ID)
 end
 local CURRENT_PLACE_NAME = GAME_MODE_NAME
-local SCRIPT_VERSION = "6.23"
+local SCRIPT_VERSION = "6.24"
 local CurrentContextMode = IS_LOBBY and "Lobby" or "Match"
 
 -- Require game Config if available for exact mathematical rainbow calculations
@@ -1873,6 +1873,15 @@ function Solver.phase(leverSolved, now, doorReadyAt, states, requiredPuzzles)
     return "DONE"
 end
 
+function Solver.exitPhase(state)
+    if state.roundComplete == true or state.winnerUserId ~= nil then return "COMPLETE" end
+    if state.cutscene == true or state.inputLocked == true or state.hintOpen == true then return "PAUSED" end
+    if state.puzzlesComplete ~= true then return "WAIT_PUZZLES" end
+    if state.keyOwned ~= true then return "WAIT_KEY" end
+    if state.escapeReady ~= true then return "WAIT_RELEASE" end
+    return "UNLOCK"
+end
+
 function Solver.lever(definition, state)
     if state.completed == true then return nil, "DONE" end
     local steps = table.clone(definition.Steps or {})
@@ -2029,6 +2038,9 @@ end)()
 
 local function getBasementNextObjective()
     if not IS_BASEMENT or not BasementState.folder then return "Porão indisponivel", nil end
+    if BasementState.automation.exitCompleted or LocalPlayer:GetAttribute("NeedleRoundComplete") == true then
+        return "Saida concluida. Capitulo finalizado.", nil
+    end
     local action = HubState.BasementAutoPuzzles and BasementState.automation.currentAction
     local definition = action and BasementState.config and BasementState.config.Puzzles
         and BasementState.config.Puzzles[action.puzzleId]
@@ -2036,6 +2048,7 @@ local function getBasementNextObjective()
         local target = BasementSolver.target(action, definition)
         if target then return "Auto: " .. (BasementPuzzleLabels[action.puzzleId] or "Alavancas"), target end
     end
+    if BasementState.automation.exitActive then return "Saindo do porao pelo alcapao", findBasementTrapdoorPart() end
     local hayFolder = ReplicatedStorage:FindFirstChild("NeedleHaystack")
     local keyOwned = LocalPlayer:GetAttribute("NeedleOwned") == true
     local keyClaimed = hayFolder and hayFolder:GetAttribute("NeedleClaimed") == true
@@ -2127,7 +2140,148 @@ function BasementSolver.resetRound()
     automation.blockedUntil = {}
     automation.details = {}
     automation.nextActionAt = 0
+    automation.exitActive = false
+    automation.exitTeleport = false
+    automation.exitCompleted = false
+    automation.exitSentAt = nil
+    automation.exitApproachReadyAt = nil
+    automation.exitAttempts = 0
+    automation.exitRetryAt = nil
+    automation.exitStatus = nil
     BasementSolver.releaseCamera(false)
+end
+
+function BasementSolver.isBusy()
+    if not IS_BASEMENT then return false end
+    local automation = BasementState.automation
+    local hay = ReplicatedStorage:FindFirstChild("NeedleHaystack")
+    return automation.active == true or automation.exitActive == true or automation.exitCompleted == true
+        or LocalPlayer:GetAttribute("NeedleRoundComplete") == true
+        or (hay ~= nil and hay:GetAttribute("WinnerUserId") ~= nil)
+end
+
+function BasementSolver.positionExit(allowTeleport)
+    local trapdoor, part = workspace:FindFirstChild("Trapdoor"), findBasementTrapdoorPart()
+    local character = LocalPlayer.Character
+    local hrp = character and character:FindFirstChild("HumanoidRootPart")
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    local camera, automation = workspace.CurrentCamera, BasementState.automation
+    if not trapdoor or not part then return false, "Aguardando alcapao/fechadura carregar." end
+    if not hrp or not humanoid or humanoid.Health <= 0 or not camera then
+        BasementSolver.releaseCamera(false)
+        return false, "Aguardando personagem e camera."
+    end
+    local pivot = trapdoor:GetPivot().Position
+    if allowTeleport and (hrp.Position - pivot).Magnitude > 22 then
+        -- The lock is on the ceiling above the ladder. Approach from below;
+        -- teleporting onto the lock itself places the character in/above the roof.
+        local destination = part.Position - Vector3.new(0, 8, 0)
+        hrp.CFrame = CFrame.lookAt(destination, destination + Vector3.new(0, 0, -1))
+        hrp.AssemblyLinearVelocity = Vector3.zero
+        automation.exitApproachReadyAt = os.clock() + 0.35
+        return false, "Aproximando da escada/alcapao..."
+    end
+    if os.clock() < (automation.exitApproachReadyAt or 0) then return false, "Ajustando posicao na saida..." end
+    if getCurrentEquippedSlot() ~= SLOT_NEEDLE then
+        if not equipToolSlot(SLOT_NEEDLE, true) or getCurrentEquippedSlot() ~= SLOT_NEEDLE then
+            return false, "Equipando a chave..."
+        end
+    end
+    if allowTeleport then
+        if not automation.cameraLease or automation.cameraLease.camera ~= camera then
+            BasementSolver.releaseCamera(false)
+            automation.cameraLease = {camera = camera, cameraType = camera.CameraType,
+                cframe = camera.CFrame, focus = camera.Focus}
+        end
+        local origin = hrp.Position + Vector3.new(0, 1.5, 0)
+        if (part.Position - origin).Magnitude < 0.01 then return false, "Ajustando mira da fechadura..." end
+        automation.cameraLease.aim = CFrame.lookAt(origin, part.Position)
+        camera.CameraType = Enum.CameraType.Scriptable
+        camera.CFrame, camera.Focus = automation.cameraLease.aim, CFrame.new(part.Position)
+    else
+        BasementSolver.releaseCamera(false)
+    end
+    -- Mirror NeedleEndingBasementClient: 24 studs from the trapdoor pivot and
+    -- aim toward the keyhole (0.68 dot fallback), with the key equipped.
+    if (hrp.Position - pivot).Magnitude > 24 then return false, "Auto TP desligado: aproxime-se da escada/alcapao." end
+    local direction = part.Position - camera.CFrame.Position
+    if direction.Magnitude < 0.01 or camera.CFrame.LookVector:Dot(direction.Unit) < 0.68 then
+        return false, "Auto TP desligado: mire a fechadura com a chave."
+    end
+    return true
+end
+
+function BasementSolver.exit(allowTeleport, puzzlesComplete)
+    local automation, now = BasementState.automation, os.clock()
+    local hay = ReplicatedStorage:FindFirstChild("NeedleHaystack")
+    local folder = BasementState.folder
+    if puzzlesComplete == nil then
+        local solved = tonumber(folder and folder:GetAttribute("SolvedPuzzleCount")) or 0
+        local required = tonumber(folder and folder:GetAttribute("RequiredPuzzleCount")) or #BasementState.requiredPuzzles
+        puzzlesComplete = required > 0 and solved >= required
+    end
+    local state = {puzzlesComplete = puzzlesComplete,
+        keyOwned = LocalPlayer:GetAttribute("NeedleOwned") == true,
+        escapeReady = folder and folder:GetAttribute("EscapeReady") == true or false,
+        roundComplete = automation.exitCompleted == true or LocalPlayer:GetAttribute("NeedleRoundComplete") == true,
+        winnerUserId = hay and hay:GetAttribute("WinnerUserId"),
+        cutscene = LocalPlayer:GetAttribute("CutsceneActive") == true,
+        inputLocked = LocalPlayer:GetAttribute("NeedleInputLocked") == true,
+        hintOpen = LocalPlayer:GetAttribute("HintViewerOpen") == true}
+    local phase = BasementSolver.exitPhase(state)
+    automation.exitTeleport = allowTeleport == true
+    automation.currentAction = nil
+    if phase ~= "UNLOCK" then
+        local notices = {COMPLETE = "Saida confirmada pelo servidor. Cena final/tela de resultado do jogo.",
+            PAUSED = "Aguardando cena/animacao do jogo terminar para sair.",
+            WAIT_PUZZLES = "Aguardando os puzzles serem concluidos.",
+            WAIT_KEY = "Puzzles concluidos; falta pegar a chave no feno para sair.",
+            WAIT_RELEASE = "Puzzles concluidos; aguardando liberacao da saida pelo servidor."}
+        automation.exitActive = phase == "PAUSED" or phase == "WAIT_RELEASE"
+        if phase == "COMPLETE" then automation.exitCompleted = true end
+        if automation.exitActive or phase == "COMPLETE" then ToolRuntime.stopVacuumAutomation() end
+        automation.exitStatus = notices[phase]
+        if phase == "WAIT_KEY" and hay and hay:GetAttribute("NeedleClaimed") == true then
+            automation.exitStatus = "Puzzles concluidos; chave com outro jogador. Aguardando ele abrir a saida."
+        end
+        BasementSolver.releaseCamera(phase == "COMPLETE" or state.cutscene or state.inputLocked)
+        return automation.exitStatus
+    end
+    automation.exitActive = true
+    ToolRuntime.stopVacuumAutomation()
+    if FarmRuntime.isCurrentlySelling or ToolRuntime.tntComboInProgress then
+        automation.exitStatus = "Finalizando venda/TNT antes de sair."
+        return automation.exitStatus
+    end
+    if automation.exitSentAt and now - automation.exitSentAt < 5 then
+        automation.exitStatus = "Abrindo alcapao; aguardando confirmacao/cena de saida."
+        return automation.exitStatus
+    end
+    if (automation.exitAttempts or 0) >= 3 then
+        automation.exitRetryAt = automation.exitRetryAt or now + 20
+        if now < automation.exitRetryAt then
+            automation.exitStatus = "Saida ainda nao confirmada; aguardando para tentar novamente."
+            return automation.exitStatus
+        end
+        automation.exitAttempts, automation.exitRetryAt = 0, nil
+    end
+    local ready, notice = BasementSolver.positionExit(allowTeleport)
+    if not ready then automation.exitStatus = notice; return notice end
+    if not Remotes.NeedleHandIn then
+        automation.exitStatus = "Interacao da saida indisponivel no servidor."
+        return automation.exitStatus
+    end
+    local ok = pcall(function() Remotes.NeedleHandIn:FireServer() end)
+    automation.exitSentAt, automation.exitAttempts = now, (automation.exitAttempts or 0) + 1
+    automation.exitStatus = ok and "Chave usada no alcapao; aguardando cena de subida/saida."
+        or "Falha ao interagir com a saida; nova tentativa com intervalo."
+    return automation.exitStatus
+end
+
+if IS_BASEMENT and Remotes.NeedleRoundCompleted then
+    table.insert(HubConnections, Remotes.NeedleRoundCompleted.OnClientEvent:Connect(function()
+        BasementState.automation.exitCompleted = true
+    end))
 end
 
 function BasementSolver.worldFolder(puzzleId)
@@ -2382,6 +2536,10 @@ function BasementSolver.tick()
     local now = os.clock()
     if not IS_BASEMENT or not HubState.BasementAutoPuzzles then
         automation.active = false
+        if not HubState.AutoWinNeedle then
+            automation.exitActive = false
+            automation.exitTeleport = false
+        end
         automation.pending = nil
         automation.currentAction = nil
         automation.status = "Desligado"
@@ -2404,6 +2562,13 @@ function BasementSolver.tick()
         return
     end
     local cutscene = LocalPlayer:GetAttribute("CutsceneActive") == true
+    if automation.exitCompleted or LocalPlayer:GetAttribute("NeedleRoundComplete") == true
+        or (hay and hay:GetAttribute("WinnerUserId") ~= nil) then
+        automation.active = false
+        automation.pending = nil
+        automation.status = BasementSolver.exit(HubState.BasementPuzzleTeleport, false)
+        return
+    end
     local leverSolved = BasementState.folder:GetAttribute("LeverPuzzleSolved") == true
     if leverSolved and automation.wasLeverSolved == false and not automation.doorReadyAt then
         -- Covers joining/running without receiving PuzzleSolved's timing event.
@@ -2417,14 +2582,15 @@ function BasementSolver.tick()
         BasementState.snapshot, BasementState.requiredPuzzles)
     automation.phase = phase
     if phase == "DONE" then
-        automation.active = cutscene or LocalPlayer:GetAttribute("NeedleInputLocked") == true
+        automation.active = false
         automation.pending = nil
         automation.currentAction = nil
-        automation.status = "Os 3 puzzles foram confirmados pelo servidor."
-        BasementSolver.releaseCamera(cutscene)
+        automation.status = BasementSolver.exit(HubState.BasementPuzzleTeleport, true)
         return
     end
     automation.active = true
+    automation.exitActive = false
+    automation.exitTeleport = false
     ToolRuntime.stopVacuumAutomation()
     if cutscene or LocalPlayer:GetAttribute("NeedleInputLocked") == true
         or LocalPlayer:GetAttribute("HintViewerOpen") == true then
@@ -2554,11 +2720,13 @@ table.insert(HubConnections, RunService.RenderStepped:Connect(function()
     local automation = BasementState.automation
     local lease = automation.cameraLease
     if not lease or not lease.aim then return end
-    if not IsHubLoaded or not HubState.BasementAutoPuzzles or not HubState.BasementPuzzleTeleport then
-        BasementSolver.releaseCamera(false)
-    elseif LocalPlayer:GetAttribute("CutsceneActive") == true then
+    local ownsCamera = HubState.BasementAutoPuzzles and HubState.BasementPuzzleTeleport
+        or automation.exitActive and automation.exitTeleport and HubState.AutoWinNeedle
+    if LocalPlayer:GetAttribute("CutsceneActive") == true or LocalPlayer:GetAttribute("NeedleInputLocked") == true then
         BasementSolver.releaseCamera(true)
-    elseif automation.active and lease.camera == workspace.CurrentCamera then
+    elseif not IsHubLoaded or not ownsCamera then
+        BasementSolver.releaseCamera(false)
+    elseif (automation.active or automation.exitActive) and lease.camera == workspace.CurrentCamera then
         lease.camera.CFrame = lease.aim
     end
 end))
@@ -2598,7 +2766,7 @@ local farmThread = task.spawn(function()
             and BasementState.folder and BasementState.folder:GetAttribute("EscapeReady") == true
         if (HubState.AutoFarmHay or HubState.AutoSell) and IS_GAMEPLAY and not FarmRuntime.isCurrentlySelling
             and not ToolRuntime.tntComboInProgress and not basementExitReady
-            and not BasementState.automation.active then
+            and not BasementSolver.isBusy() then
             local hrp = getHRP()
             local char = getCharacter()
 
@@ -2766,7 +2934,7 @@ local tntThread = task.spawn(function()
             and BasementState.folder and BasementState.folder:GetAttribute("EscapeReady") == true
         if HubState.AutoUseTnt and IS_GAMEPLAY and not FarmRuntime.isCurrentlySelling
             and not ToolRuntime.tntComboInProgress and not basementExitReady
-            and not BasementState.automation.active then
+            and not BasementSolver.isBusy() then
             local hrp = getHRP()
             if hrp and isToolOwned("Tnt") then
                 local currentHay = getHayHeld()
@@ -2791,7 +2959,7 @@ local gemThread = task.spawn(function()
     while IsHubLoaded do
         task.wait(0.8)
         if HubState.AutoCollectGems and IS_GAMEPLAY and Remotes.CollectGem
-            and not BasementState.automation.active then
+            and not BasementSolver.isBusy() then
             local gemsFolder = workspace:FindFirstChild("GemsClient")
             local hrp = getHRP()
             if gemsFolder and hrp then
@@ -2837,7 +3005,7 @@ table.insert(HubThreads, gemThread)
 if Remotes.GemSpawned then
     local conn = Remotes.GemSpawned.OnClientEvent:Connect(function(gemId)
         if HubState.AutoCollectGems and not HubState.NoTeleportMode and Remotes.CollectGem and gemId then
-            pcall(function() Remotes.CollectGem:FireServer(gemId) end)
+            if not BasementSolver.isBusy() then pcall(function() Remotes.CollectGem:FireServer(gemId) end) end
         end
     end)
     table.insert(HubConnections, conn)
@@ -2845,35 +3013,18 @@ end
 
 -- 8.3 AUTO-WIN NEEDLE ENGINE
 local lastNeedleMovementNoticeAt = 0
-local lastBasementHandInAt = 0
 local needleThread = task.spawn(function()
     while IsHubLoaded do
         task.wait(0.4)
-        if HubState.AutoWinNeedle and IS_GAMEPLAY then
+        if HubState.AutoWinNeedle and IS_GAMEPLAY
+            and not (IS_BASEMENT and HubState.BasementAutoPuzzles and BasementSolver.isBusy())
+            and not (IS_BASEMENT and (BasementState.automation.exitCompleted
+                or LocalPlayer:GetAttribute("NeedleRoundComplete") == true)) then
             local needleOwned = LocalPlayer:GetAttribute("NeedleOwned")
 
             if needleOwned then
                 if IS_BASEMENT then
-                    local escapeReady = BasementState.folder and BasementState.folder:GetAttribute("EscapeReady") == true
-                    if escapeReady then
-                        equipToolSlot(SLOT_NEEDLE)
-                        local trapdoorPart = findBasementTrapdoorPart()
-                        local hrp = getHRP()
-                        local distance = trapdoorPart and hrp and (hrp.Position - trapdoorPart.Position).Magnitude or math.huge
-                        if trapdoorPart and not HubState.NoTeleportMode and distance > 24 then
-                            teleportTo(trapdoorPart.Position)
-                            task.wait(0.2)
-                        end
-                        local readyToUnlock = LocalPlayer:GetAttribute("TrapdoorUnlockReady") == true
-                        if readyToUnlock and Remotes.NeedleHandIn
-                            and os.clock() - lastBasementHandInAt >= 1.2 then
-                            lastBasementHandInAt = os.clock()
-                            pcall(function() Remotes.NeedleHandIn:FireServer() end)
-                        elseif os.clock() - lastNeedleMovementNoticeAt >= 8 then
-                            lastNeedleMovementNoticeAt = os.clock()
-                            addLog("info", string.format("Saida liberada. Aproxime-se e mire a fechadura com a chave (%.0f studs).", distance))
-                        end
-                    end
+                    BasementSolver.exit(not HubState.NoTeleportMode)
                 else
                     equipToolSlot(SLOT_NEEDLE)
                     scanExactLandmarks()
@@ -2919,7 +3070,7 @@ local droneThread = task.spawn(function()
     while IsHubLoaded do
         task.wait(2.5)
         if HubState.AutoDeployDrone and IS_GAMEPLAY and Remotes.DeployDrone
-            and not BasementState.automation.active
+            and not BasementSolver.isBusy()
             and not (NeedleProtection.anchor and not NeedleProtection.ready) then
             if isToolOwned("Drone") and LocalPlayer:GetAttribute("DroneDeployed") ~= true then
                 pcall(function() Remotes.DeployDrone:FireServer() end)
@@ -3185,6 +3336,7 @@ if Remotes.ShopPurchaseResult then
             addLog("info", displayName .. " comprada com sucesso.")
             if HubState.AutoEquipBestTool then
                 task.defer(function()
+                    if BasementSolver.isBusy() then return end
                     local bestSlot = getBestAvailableToolSlot()
                     equipToolSlot(bestSlot, true)
                 end)
@@ -3207,6 +3359,7 @@ for toolId, attributes in pairs(ToolOwnershipAttributes) do
                 PendingToolPurchases[capturedToolId] = nil
                 if HubState.AutoEquipBestTool then
                     task.defer(function()
+                        if BasementSolver.isBusy() then return end
                         local bestSlot = getBestAvailableToolSlot()
                         equipToolSlot(bestSlot, true)
                     end)
@@ -3228,7 +3381,7 @@ end
 local autoBuyThread = task.spawn(function()
     while IsHubLoaded do
         task.wait(1.5)
-        if IS_GAMEPLAY then
+        if IS_GAMEPLAY and not BasementSolver.isBusy() then
             -- Buy a single progression item per cycle. This prevents prompt/event spam.
             local purchaseSent = false
             if HubState.AutoBuyTools then
@@ -4909,12 +5062,16 @@ local function buildNativeUI()
         if basementTab then
             addNativeSection(basementTab, "Capitulo 2: Porão", Color3.fromRGB(255, 190, 75))
             addNativeParagraph(basementTab, "Fluxo do capitulo",
-                "Alavancas 1, 2 e 3, depois os puzzles na ordem do jogo. Cores conta as gemas visiveis da pista e ajusta os contadores; nao testa combinacoes.",
+                "Alavancas 1, 2 e 3, depois os puzzles na ordem do jogo. Ao concluir, usa a chave na saida automaticamente. Com Auto TP ligado, aproxima-se da escada e mira a fechadura.",
                 Color3.fromRGB(255, 190, 75))
             addNativeToggle(basementTab, "Auto Puzzles", HubState.BasementAutoPuzzles, function(val)
                 HubState.BasementAutoPuzzles = val
                 if not val then
                     BasementState.automation.active = false
+                    if not HubState.AutoWinNeedle then
+                        BasementState.automation.exitActive = false
+                        BasementState.automation.exitTeleport = false
+                    end
                     BasementState.automation.pending = nil
                     BasementState.automation.currentAction = nil
                     BasementSolver.releaseCamera(LocalPlayer:GetAttribute("CutsceneActive") == true)
@@ -4977,7 +5134,7 @@ local function buildNativeUI()
                     end
                     local escapeReady = BasementState.folder and BasementState.folder:GetAttribute("EscapeReady") == true
                     local phase = BasementState.folder and BasementState.folder:GetAttribute("ReleasePhase") or "?"
-                    exitCard.Text = string.format("Puzzles: %d/%d | Saida: %s | Fase: %s", solved or 0,
+                    exitCard.Text = BasementState.automation.exitStatus or string.format("Puzzles: %d/%d | Saida: %s | Fase: %s", solved or 0,
                         required or #BasementState.requiredPuzzles, escapeReady and "liberada" or "bloqueada", tostring(phase))
                     nextCard.Text = getBasementNextObjective()
                     task.wait(1)

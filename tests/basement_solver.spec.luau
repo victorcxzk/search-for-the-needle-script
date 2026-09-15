@@ -35,6 +35,25 @@ phase, id = Solver.phase(true, 106, nil, {ColorPuzzle = {completed = true}, Pict
     {"ColorPuzzle", "PicturePuzzle", "NumberPuzzle"})
 check(id == "NumberPuzzle", "keypad follows preceding stages")
 
+local function flag(mask, index) return math.floor(mask / 2 ^ index) % 2 == 1 end
+for mask = 0, 127 do
+    local state = {puzzlesComplete = flag(mask, 0), keyOwned = flag(mask, 1), escapeReady = flag(mask, 2),
+        cutscene = flag(mask, 3), inputLocked = flag(mask, 4), hintOpen = flag(mask, 5), roundComplete = flag(mask, 6)}
+    local expected = state.roundComplete and "COMPLETE"
+        or ((state.cutscene or state.inputLocked or state.hintOpen) and "PAUSED")
+        or (not state.puzzlesComplete and "WAIT_PUZZLES") or (not state.keyOwned and "WAIT_KEY")
+        or (not state.escapeReady and "WAIT_RELEASE") or "UNLOCK"
+    check(Solver.exitPhase(state) == expected, "exit must respect puzzles, key, release, cutscenes and actual completion")
+end
+check(Solver.exitPhase({}) == "WAIT_PUZZLES", "missing exit prerequisites must never trigger a hand-in")
+check(Solver.exitPhase({winnerUserId = 12345}) == "COMPLETE", "another player's server win stops exit interactions too")
+check(Solver.exitPhase({puzzlesComplete = true, keyOwned = true, escapeReady = true}) == "UNLOCK",
+    "auto exit must not depend on a separate AutoWin toggle")
+check(Solver.exitPhase({puzzlesComplete = true, keyOwned = false, escapeReady = true}) == "WAIT_KEY",
+    "escape release alone is not ownership of the key")
+check(Solver.exitPhase({puzzlesComplete = true, keyOwned = true, escapeReady = "true"}) == "WAIT_RELEASE",
+    "only the server's boolean EscapeReady authorizes exit")
+
 local numberDefinition = {CodeLength = 4}
 local originalNumberState = {code = "", taken = {[1] = true}}
 local mergedNumberState = Solver.mergeNumberState(originalNumberState, {[2] = true}, "0042")

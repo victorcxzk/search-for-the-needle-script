@@ -34,6 +34,15 @@ function Solver.phase(leverSolved, now, doorReadyAt, states, requiredPuzzles)
     return "DONE"
 end
 
+function Solver.exitPhase(state)
+    if state.roundComplete == true or state.winnerUserId ~= nil then return "COMPLETE" end
+    if state.cutscene == true or state.inputLocked == true or state.hintOpen == true then return "PAUSED" end
+    if state.puzzlesComplete ~= true then return "WAIT_PUZZLES" end
+    if state.keyOwned ~= true then return "WAIT_KEY" end
+    if state.escapeReady ~= true then return "WAIT_RELEASE" end
+    return "UNLOCK"
+end
+
 function Solver.lever(definition, state)
     if state.completed == true then return nil, "DONE" end
     local steps = table.clone(definition.Steps or {})
