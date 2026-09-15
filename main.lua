@@ -1,5 +1,5 @@
 --[[
-    SEARCH FOR THE NEEDLE - ULTIMATE AUTOMATION HUB v6.19 PRO
+    SEARCH FOR THE NEEDLE - ULTIMATE AUTOMATION HUB v6.20 PRO
     Forensically Engineered from Luau Decompiler Bytecode Dump
     - Exact Multi-Grab Batching using LocalPlayer:GetAttribute("HayGrabCount") & getGrabCandidates
     - Rare / RGB priority via HayMutation and the game's value multipliers
@@ -7,6 +7,7 @@
     - Auto-Win Needle via PickHay("Objective"), slot equip, and Farmer hand-in
     - Full Autonomous Sell-Cycle at CollectionService:GetTagged("SellPart")
     - Frosted Graphite UI with viewport-safe dragging, restore, reopen, and resizing
+    - Basement Auto Puzzles with server-confirmed actions and optional automatic positioning
     - 3rd Person Camera & Right-Click 360 Orbiting
     - Zero Emojis - 100% Safe Execution
 ]]
@@ -130,7 +131,7 @@ else
     GAME_MODE_NAME = "Place " .. tostring(CURRENT_PLACE_ID)
 end
 local CURRENT_PLACE_NAME = GAME_MODE_NAME
-local SCRIPT_VERSION = "6.19"
+local SCRIPT_VERSION = "6.20"
 local CurrentContextMode = IS_LOBBY and "Lobby" or "Match"
 
 -- Require game Config if available for exact mathematical rainbow calculations
@@ -621,6 +622,18 @@ local BasementState = {
     snapshot = nil,
     requiredPuzzles = {"ColorPuzzle", "PicturePuzzle", "NumberPuzzle"},
     config = nil,
+    automation = {
+        active = false,
+        status = "Desligado",
+        details = {},
+        posterTaken = {},
+        numberCode = nil,
+        attempts = {},
+        blockedUntil = {},
+        nextActionAt = 0,
+        lastSyncAt = 0,
+        lastErrorAt = 0,
+    },
 }
 BasementState.remote = BasementState.folder and BasementState.folder:WaitForChild("PuzzleState", 5) or nil
 if IS_BASEMENT and BasementState.folder then
@@ -653,6 +666,19 @@ if IS_BASEMENT and BasementState.folder then
         task.defer(function()
             if IsHubLoaded then pcall(function() BasementState.remote:FireServer() end) end
         end)
+    end
+    local feedbackRemote = BasementState.folder:FindFirstChild("PuzzleFeedback")
+    if feedbackRemote and feedbackRemote:IsA("RemoteEvent") then
+        table.insert(HubConnections, feedbackRemote.OnClientEvent:Connect(function(puzzleId, kind, index, success, code)
+            if puzzleId ~= "NumberPuzzle" then return end
+            local automation = BasementState.automation
+            if kind == "Poster" then
+                if type(index) == "number" then automation.posterTaken[index] = true end
+                if type(code) == "string" and code:match("^%d+$") then automation.numberCode = code end
+            elseif kind == "Submit" and index == false then
+                automation.submitRejectedAt = os.clock()
+            end
+        end))
     end
 end
 
@@ -695,7 +721,8 @@ local HubState = {
     PlayerESP = false,
     SellESP = true,
     BasementGuideESP = true,
-    BasementAutoLevers = false,
+    BasementAutoPuzzles = false,
+    BasementPuzzleTeleport = true,
 
 }
 
@@ -1800,8 +1827,167 @@ local BasementPuzzleLabels = {
     NumberPuzzle = "Teclado numerico",
 }
 
+local BasementSolver = (function()
+-- BEGIN EMBEDDED BASEMENT SOLVER
+-- Pure planning only. The embedded copy in main.lua must match this module.
+-- Never treats a sent action as success; the runtime must wait for server state.
+local Solver = {}
+
+function Solver.isTaken(taken, index)
+    return type(taken) == "table" and (taken[index] == true or taken[tostring(index)] == true)
+end
+
+function Solver.lever(definition, state)
+    if state.completed == true then return nil, "DONE" end
+    for _, step in ipairs(definition.Steps or {}) do
+        if not (state.steps and state.steps[step.Id]) then
+            return {kind = "Lever", puzzleId = "LeverPuzzle", stepId = step.Id, model = step.Model}
+        end
+    end
+    return nil, "WAIT_SERVER"
+end
+
+function Solver.mergeNumberState(state, feedbackTaken, feedbackCode)
+    if type(state) ~= "table" then return nil end
+    local copy = table.clone(state)
+    copy.taken = table.clone(type(state.taken) == "table" and state.taken or {})
+    for index, taken in pairs(feedbackTaken or {}) do
+        if taken == true then copy.taken[index] = true end
+    end
+    if not (type(copy.code) == "string" and copy.code:match("^%d+$"))
+        and type(feedbackCode) == "string" and feedbackCode:match("^%d+$") then
+        copy.code = feedbackCode
+    end
+    return copy
+end
+
+function Solver.number(definition, state, posters)
+    if state.completed == true then return nil, "DONE" end
+    local code = state.code
+    if type(code) == "string" and code:match("^%d+$") and #code == definition.CodeLength then
+        -- Do not tonumber(code): a code starting with zero must keep that zero.
+        return {kind = "Submit", puzzleId = "NumberPuzzle", code = code}
+    end
+    for _, poster in ipairs(posters) do
+        if not Solver.isTaken(state.taken, poster.index) then
+            return {kind = "Poster", puzzleId = "NumberPuzzle", index = poster.index, model = poster.model}
+        end
+    end
+    return nil, "WAIT_CODE"
+end
+
+function Solver.picture(definition, state)
+    if state.completed == true then return nil, "DONE" end
+    local rotations = state.rotations
+    if type(rotations) ~= "table" then return nil, "WAIT_STATE" end
+    local size = tonumber(definition.GridSize)
+    if not size or size < 1 or size > 8 or size % 1 ~= 0 then return nil, "BAD_CONFIG" end
+    for index = 1, size * size do
+        local id = "Tile" .. index
+        local value = rotations[id]
+        if type(value) ~= "number" or value % 1 ~= 0 then return nil, "WAIT_STATE" end
+        if value % 4 ~= 0 then
+            return {kind = "Rotate", puzzleId = "PicturePuzzle", stepId = id, before = value,
+                expected = (value + 1) % 4}
+        end
+    end
+    -- Zero is the unrotated image orientation, not a fabricated completion flag.
+    return nil, "WAIT_SERVER"
+end
+
+function Solver.color(definition, state, search)
+    if state.completed == true then return nil, search, "DONE" end
+    local minimum, maximum = tonumber(definition.MinCount), tonumber(definition.MaxCount)
+    if not minimum or not maximum or minimum % 1 ~= 0 or maximum % 1 ~= 0
+        or maximum < minimum or maximum - minimum > 19 then
+        return nil, search, "BAD_CONFIG"
+    end
+    local steps, values = definition.Steps, state.values
+    if type(steps) ~= "table" or #steps == 0 or #steps > 8 or type(values) ~= "table" then
+        return nil, search, "WAIT_STATE"
+    end
+    local ids, vector = {}, {}
+    for index, step in ipairs(steps) do
+        if type(step.Id) ~= "string" then return nil, search, "BAD_CONFIG" end
+        ids[index] = step.Id
+        local value = values[step.Id]
+        if type(value) ~= "number" or value % 1 ~= 0 then return nil, search, "WAIT_STATE" end
+        if value < minimum or value > maximum then
+            -- Some rounds start with zero. Normalize it before enumerating.
+            if value ~= minimum - 1 then return nil, search, "BAD_STATE" end
+            return {kind = "Counter", puzzleId = "ColorPuzzle", stepId = step.Id,
+                model = step.Model, before = value, expected = minimum, normalize = true}, nil
+        end
+        vector[index] = value
+    end
+    if minimum == maximum then return nil, search, "WAIT_SERVER" end
+    local reset = not search or #search.ids ~= #ids or search.minimum ~= minimum or search.maximum ~= maximum
+    if not reset then
+        for index, id in ipairs(ids) do
+            if search.ids[index] ~= id or search.vector[index] ~= vector[index] then reset = true; break end
+        end
+    end
+    if reset then
+        search = {ids = ids, vector = table.clone(vector), start = table.clone(vector), cursor = 1,
+            minimum = minimum, maximum = maximum, actions = 0, total = (maximum - minimum + 1) ^ #ids}
+    end
+    if search.cursor > #ids then return nil, search, "EXHAUSTED" end
+    local index = search.cursor
+    return {kind = "Counter", puzzleId = "ColorPuzzle", stepId = ids[index], model = steps[index].Model,
+        before = vector[index], expected = vector[index] == maximum and minimum or vector[index] + 1,
+        colorIndex = index}, search
+end
+
+function Solver.acceptColor(search, action, state)
+    if not search or action.normalize then return nil end
+    local values = state.values
+    if type(values) ~= "table" or values[action.stepId] ~= action.expected then return nil end
+    for index, id in ipairs(search.ids) do
+        if index ~= action.colorIndex and values[id] ~= search.vector[index] then return nil end
+    end
+    search.vector[action.colorIndex] = action.expected
+    search.actions = search.actions + 1
+    -- Mixed-radix odometer: exhaust one counter before carrying to the next.
+    search.cursor = action.expected == search.start[action.colorIndex] and action.colorIndex + 1 or 1
+    return search
+end
+
+function Solver.acknowledged(action, state)
+    if type(state) ~= "table" then return false end
+    if state.completed == true then return true end
+    if action.kind == "Lever" then return state.steps and not not state.steps[action.stepId] or false end
+    if action.kind == "Poster" then
+        return Solver.isTaken(state.taken, action.index) or (type(state.code) == "string" and #state.code > 0)
+    end
+    if action.kind == "Rotate" then
+        return type(state.rotations) == "table" and type(state.rotations[action.stepId]) == "number"
+            and state.rotations[action.stepId] ~= action.before
+    end
+    if action.kind == "Counter" then
+        return type(state.values) == "table" and type(state.values[action.stepId]) == "number"
+            and state.values[action.stepId] ~= action.before
+    end
+    return false
+end
+
+function Solver.token(action)
+    return table.concat({action.puzzleId, action.kind, tostring(action.stepId or action.index or ""),
+        tostring(action.before or action.code or "")}, ":")
+end
+
+return Solver
+-- END EMBEDDED BASEMENT SOLVER
+end)()
+
 local function getBasementNextObjective()
     if not IS_BASEMENT or not BasementState.folder then return "Porão indisponivel", nil end
+    local action = HubState.BasementAutoPuzzles and BasementState.automation.currentAction
+    local definition = action and BasementState.config and BasementState.config.Puzzles
+        and BasementState.config.Puzzles[action.puzzleId]
+    if definition then
+        local target = BasementSolver.target(action, definition)
+        if target then return "Auto: " .. (BasementPuzzleLabels[action.puzzleId] or "Alavancas"), target end
+    end
     local hayFolder = ReplicatedStorage:FindFirstChild("NeedleHaystack")
     local keyOwned = LocalPlayer:GetAttribute("NeedleOwned") == true
     local keyClaimed = hayFolder and hayFolder:GetAttribute("NeedleClaimed") == true
@@ -1843,52 +2029,347 @@ local function getBasementNextObjective()
     return "Aguardando liberacao da saida", findBasementTrapdoorPart()
 end
 
-local basementLeverThread = task.spawn(function()
-    local lastAttemptAt = 0
-    while IsHubLoaded do
-        task.wait(0.8)
-        if IS_BASEMENT and HubState.BasementAutoLevers
-            and LocalPlayer:GetAttribute("NeedleOwned") == true
-            and LocalPlayer:GetAttribute("CutsceneActive") ~= true
-            and LocalPlayer:GetAttribute("NeedleInputLocked") ~= true
-            and BasementState.folder and BasementState.folder:GetAttribute("LeverPuzzleSolved") ~= true
-            and BasementState.snapshot and BasementState.config
-            and os.clock() - lastAttemptAt >= 1.5 then
-            local actionRemote = BasementState.folder:FindFirstChild("PuzzleAction")
-            local definition = BasementState.config.Puzzles and BasementState.config.Puzzles.LeverPuzzle
-            local folder = type(BasementState.config.folderFor) == "function"
-                and BasementState.config.folderFor("LeverPuzzle") or nil
-            local snapshot = BasementState.snapshot.LeverPuzzle
-            local hrp = getHRP()
-            if actionRemote and actionRemote:IsA("RemoteEvent") and definition and folder and hrp
-                and type(snapshot) == "table" and snapshot.completed ~= true then
-                for _, step in ipairs(definition.Steps or {}) do
-                    local done = type(snapshot.steps) == "table" and snapshot.steps[step.Id] ~= nil
-                    if not done and type(BasementState.config.resolve) == "function" then
-                        local model = BasementState.config.resolve(folder, step.Model)
-                        local part = resolveWorldPart(model)
-                        local reach = tonumber(definition.InteractDistance) or 14
-                        local camera = workspace.CurrentCamera
-                        local direction = part and camera and (part.Position - camera.CFrame.Position) or nil
-                        local aimed = direction and direction.Magnitude > 0.001
-                            and camera.CFrame.LookVector:Dot(direction.Unit) >= (tonumber(definition.AimDot) or 0.88)
-                        if part and aimed and (part.Position - hrp.Position).Magnitude <= reach then
-                            lastAttemptAt = os.clock()
-                            pcall(function() actionRemote:FireServer("LeverPuzzle", step.Id) end)
-                            task.delay(0.4, function()
-                                if IsHubLoaded and BasementState.remote then
-                                    pcall(function() BasementState.remote:FireServer() end)
-                                end
-                            end)
-                            break
-                        end
-                    end
+function BasementSolver.snapshot(puzzleId)
+    local state = BasementState.snapshot and BasementState.snapshot[puzzleId]
+    if type(state) ~= "table" then return nil end
+    if puzzleId ~= "NumberPuzzle" then return state end
+    return BasementSolver.mergeNumberState(state, BasementState.automation.posterTaken, BasementState.automation.numberCode)
+end
+
+function BasementSolver.releaseCamera(cutscene)
+    local automation = BasementState.automation
+    local lease = automation.cameraLease
+    automation.cameraLease = nil
+    if lease and not cutscene and lease.camera == workspace.CurrentCamera
+        and lease.camera.CameraType == Enum.CameraType.Scriptable then
+        lease.camera.CameraType = lease.cameraType
+        lease.camera.CFrame = lease.cframe
+        lease.camera.Focus = lease.focus
+    end
+end
+
+function BasementSolver.resetRound()
+    local automation = BasementState.automation
+    automation.pending = nil
+    automation.colorSearch = nil
+    automation.currentAction = nil
+    automation.posterTaken = {}
+    automation.numberCode = nil
+    automation.submitRejectedAt = nil
+    automation.attempts = {}
+    automation.blockedUntil = {}
+    automation.details = {}
+    automation.nextActionAt = 0
+    BasementSolver.releaseCamera(false)
+end
+
+function BasementSolver.worldFolder(puzzleId)
+    local config = BasementState.config
+    if config and type(config.folderFor) == "function" then
+        local ok, folder = pcall(config.folderFor, puzzleId)
+        if ok and typeof(folder) == "Instance" then return folder end
+    end
+    local world = workspace:FindFirstChild("Puzzles")
+    return world and world:FindFirstChild(puzzleId)
+end
+
+function BasementSolver.target(action, definition)
+    local folder = BasementSolver.worldFolder(action.puzzleId)
+    if not folder then return nil end
+    local model, board
+    if action.kind == "Poster" then
+        model = action.model
+    elseif action.kind == "Submit" then
+        model = folder:FindFirstChild(definition.Keypad or "Keypad", true)
+    elseif action.kind == "Rotate" then
+        local picture = folder:FindFirstChild("PicturePuzzle") or folder
+        board = picture:FindFirstChild("BoardPart", true)
+        local hitboxes = picture:FindFirstChild("TileHitboxes", true)
+        model = hitboxes and hitboxes:FindFirstChild(action.stepId, true)
+        local tileIndex = tonumber(action.stepId:match("^Tile(%d+)$"))
+        if hitboxes and (not model or model:GetAttribute("TileIndex") ~= tileIndex) then
+            model = nil
+            for _, candidate in ipairs(hitboxes:GetDescendants()) do
+                if candidate:IsA("BasePart") and candidate:GetAttribute("TileIndex") == tileIndex then
+                    model = candidate
+                    break
                 end
             end
         end
+        if not model then return nil end
+    elseif typeof(action.model) == "Instance" then
+        model = action.model
+    elseif type(BasementState.config.resolve) == "function" then
+        local ok, result = pcall(BasementState.config.resolve, folder, action.model)
+        if ok then model = result end
     end
+    if typeof(model) ~= "Instance" then return nil end
+    local part = resolveWorldPart(model)
+    return part, model, board
+end
+
+function BasementSolver.posters(definition)
+    local folder = BasementSolver.worldFolder("NumberPuzzle")
+    local container = folder and folder:FindFirstChild(definition.Posters or "Posters", true)
+    local result = {}
+    if container then
+        for _, part in ipairs(container:GetChildren()) do
+            local index = part:GetAttribute(BasementState.config.PosterIndexAttribute or "PosterIndex")
+            if part:IsA("BasePart") and type(index) == "number" then
+                table.insert(result, {index = index, model = part})
+            end
+        end
+    end
+    table.sort(result, function(a, b) return a.index < b.index end)
+    return result
+end
+
+function BasementSolver.position(action, definition)
+    local part, model, board = BasementSolver.target(action, definition)
+    local character = LocalPlayer.Character
+    local hrp = character and character:FindFirstChild("HumanoidRootPart")
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    local camera = workspace.CurrentCamera
+    if not part or not part:IsDescendantOf(workspace) then return false, "Controle ainda nao carregou no mapa." end
+    if not hrp or not humanoid or humanoid.Health <= 0 or not camera then
+        BasementSolver.releaseCamera(false)
+        return false, "Aguardando personagem e camera."
+    end
+    local reach = tonumber(action.kind == "Poster" and definition.PosterDistance or definition.InteractDistance)
+    if not reach or reach <= 2 then return false, "Distancia de interacao ausente na configuracao." end
+    local anchor = board and board:IsA("BasePart") and board or part
+    if HubState.BasementPuzzleTeleport then
+        local backside = board and board:IsA("BasePart")
+            and board.CFrame:PointToObjectSpace(hrp.Position).Z >= -1
+        if (hrp.Position - anchor.Position).Magnitude > reach - 2 or backside then
+            local forward = Vector3.new(anchor.CFrame.LookVector.X, 0, anchor.CFrame.LookVector.Z)
+            if forward.Magnitude < 0.01 then forward = Vector3.new(0, 0, -1) end
+            local destination = anchor.Position + forward.Unit * math.min(6, reach * 0.5)
+                + Vector3.new(0, 1, 0)
+            hrp.CFrame = CFrame.lookAt(destination, Vector3.new(part.Position.X, destination.Y, part.Position.Z))
+            hrp.AssemblyLinearVelocity = Vector3.zero
+            BasementState.automation.nextActionAt = os.clock() + 0.35
+            return false, "Aproximando do controle..."
+        end
+        local automation = BasementState.automation
+        if not automation.cameraLease or automation.cameraLease.camera ~= camera then
+            BasementSolver.releaseCamera(false)
+            automation.cameraLease = {camera = camera, cameraType = camera.CameraType,
+                cframe = camera.CFrame, focus = camera.Focus}
+        end
+        local origin = hrp.Position + Vector3.new(0, 1.5, 0)
+        if (part.Position - origin).Magnitude < 0.01 then return false, "Ajustando mira..." end
+        automation.cameraLease.aim = CFrame.lookAt(origin, part.Position)
+        camera.CameraType = Enum.CameraType.Scriptable
+        camera.CFrame = automation.cameraLease.aim
+        camera.Focus = CFrame.new(part.Position)
+    else
+        BasementSolver.releaseCamera(false)
+    end
+    if (hrp.Position - anchor.Position).Magnitude > reach then
+        return false, "Auto TP desligado: aproxime-se do controle."
+    end
+    local direction = part.Position - camera.CFrame.Position
+    if direction.Magnitude > 0.001 and camera.CFrame.LookVector:Dot(direction.Unit)
+        < (tonumber(definition.AimDot) or 0.82) then
+        return false, "Auto TP desligado: mire no controle."
+    end
+    if board and board:IsA("BasePart") and board.CFrame:PointToObjectSpace(camera.CFrame.Position).Z >= 0 then
+        return false, "Fique em frente ao quadro, nao atras."
+    end
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = {character, camera}
+    local hit = workspace:Raycast(camera.CFrame.Position, direction, params)
+    if hit and hit.Instance ~= part and hit.Instance ~= model and not hit.Instance:IsDescendantOf(model) then
+        return false, "Mira bloqueada por um objeto."
+    end
+    return true
+end
+
+function BasementSolver.sync()
+    local automation = BasementState.automation
+    if BasementState.remote and os.clock() - automation.lastSyncAt >= 2 then
+        automation.lastSyncAt = os.clock()
+        pcall(function() BasementState.remote:FireServer() end)
+    end
+end
+
+function BasementSolver.tick()
+    local automation = BasementState.automation
+    local now = os.clock()
+    if not IS_BASEMENT or not HubState.BasementAutoPuzzles then
+        automation.active = false
+        automation.pending = nil
+        automation.currentAction = nil
+        automation.status = "Desligado"
+        BasementSolver.releaseCamera(LocalPlayer:GetAttribute("CutsceneActive") == true)
+        return
+    end
+    local hay = ReplicatedStorage:FindFirstChild("NeedleHaystack")
+    local claimed = hay and hay:GetAttribute("NeedleClaimed") == true or false
+    local targetId = Landmarks.TargetNeedleHayId
+    if (automation.wasClaimed and not claimed)
+        or (automation.targetId and targetId and automation.targetId ~= targetId) then
+        BasementSolver.resetRound()
+    end
+    automation.wasClaimed = claimed
+    automation.targetId = targetId or automation.targetId
+    local keyReady = claimed or LocalPlayer:GetAttribute("NeedleOwned") == true
+        or (BasementState.folder and BasementState.folder:GetAttribute("LeverPuzzleSolved") == true)
+    if not keyReady then
+        automation.active = false
+        automation.status = "Aguardando a chave; use Auto Farm + Auto Win."
+        BasementSolver.releaseCamera(false)
+        return
+    end
+    local cutscene = LocalPlayer:GetAttribute("CutsceneActive") == true
+    local allDone = true
+    for _, id in ipairs(BasementState.requiredPuzzles) do
+        local state = BasementSolver.snapshot(id)
+        if not state or state.completed ~= true then allDone = false end
+    end
+    if allDone then
+        automation.active = cutscene or LocalPlayer:GetAttribute("NeedleInputLocked") == true
+        automation.pending = nil
+        automation.currentAction = nil
+        automation.status = "Os 3 puzzles foram confirmados pelo servidor."
+        BasementSolver.releaseCamera(cutscene)
+        return
+    end
+    automation.active = true
+    ToolRuntime.stopVacuumAutomation()
+    if cutscene or LocalPlayer:GetAttribute("NeedleInputLocked") == true
+        or LocalPlayer:GetAttribute("HintViewerOpen") == true then
+        automation.status = "Pausado durante cena ou interface do jogo."
+        BasementSolver.releaseCamera(cutscene)
+        return
+    end
+    if not BasementState.config or not BasementState.folder then
+        automation.status = "Aguardando configuracao dos puzzles."
+        return
+    end
+    BasementSolver.sync()
+    if FarmRuntime.isCurrentlySelling or ToolRuntime.tntComboInProgress then
+        automation.status = "Aguardando terminar venda/TNT."
+        return
+    end
+    local definitions = BasementState.config.Puzzles
+    if type(definitions) ~= "table" then automation.status = "Configuracao de puzzles indisponivel."; return end
+    local pending = automation.pending
+    if pending then
+        local state = BasementSolver.snapshot(pending.action.puzzleId)
+        local token = BasementSolver.token(pending.action)
+        if BasementSolver.acknowledged(pending.action, state) then
+            if pending.action.kind == "Counter" then
+                automation.colorSearch = BasementSolver.acceptColor(automation.colorSearch, pending.action, state)
+            end
+            automation.attempts[token] = nil
+            automation.blockedUntil[token] = nil
+            automation.pending = nil
+            automation.currentAction = nil
+            automation.nextActionAt = now + 0.4
+        elseif pending.action.kind == "Submit" and (automation.submitRejectedAt or 0) >= pending.sentAt then
+            automation.pending = nil
+            automation.blockedUntil[token] = now + 15
+            automation.details.NumberPuzzle = "Codigo recusado pelo servidor; aguardando sincronizacao."
+        elseif now - pending.sentAt < 5 then
+            automation.status = "Aguardando confirmacao: " .. (BasementPuzzleLabels[pending.action.puzzleId] or "Alavancas")
+            return
+        else
+            automation.pending = nil
+            if (automation.attempts[token] or 0) >= 3 then
+                automation.blockedUntil[token] = now + 20
+                automation.attempts[token] = nil
+            else
+                automation.nextActionAt = now + 1
+            end
+            automation.details[pending.action.puzzleId] = "Servidor nao confirmou; nova tentativa com intervalo."
+        end
+    end
+    if now < automation.nextActionAt then return end
+    local order = {"NumberPuzzle", "PicturePuzzle", "ColorPuzzle"}
+    local levers = BasementSolver.snapshot("LeverPuzzle")
+    if BasementState.folder:GetAttribute("LeverPuzzleSolved") ~= true and not (levers and levers.completed == true) then
+        order = {"LeverPuzzle"}
+    end
+    for _, id in ipairs(order) do
+        local definition, state = definitions[id], BasementSolver.snapshot(id)
+        local action, reason
+        if type(definition) ~= "table" or not state then
+            automation.details[id] = "Aguardando configuracao/estado replicado."
+        elseif state.completed == true then
+            automation.details[id] = "Concluido pelo servidor."
+        else
+            if id == "LeverPuzzle" then action, reason = BasementSolver.lever(definition, state)
+            elseif id == "NumberPuzzle" then action, reason = BasementSolver.number(definition, state, BasementSolver.posters(definition))
+            elseif id == "PicturePuzzle" then action, reason = BasementSolver.picture(definition, state)
+            elseif id == "ColorPuzzle" then
+                action, automation.colorSearch, reason = BasementSolver.color(definition, state, automation.colorSearch)
+            end
+            if action then
+                local token = BasementSolver.token(action)
+                if now >= (automation.blockedUntil[token] or 0) then
+                    automation.currentAction = action
+                    local ready, notice = BasementSolver.position(action, definition)
+                    automation.status = (BasementPuzzleLabels[id] or "Alavancas") .. ": " .. (notice or "interagindo...")
+                    automation.details[id] = notice or (id == "ColorPuzzle"
+                        and ("Busca controlada: " .. tostring(automation.colorSearch and automation.colorSearch.actions or 0)
+                            .. " acoes confirmadas.") or "Resolvendo automaticamente...")
+                    if not ready then return end
+                    local remote = BasementState.folder:FindFirstChild("PuzzleAction")
+                    if not remote or not remote:IsA("RemoteEvent") then automation.status = "PuzzleAction indisponivel."; return end
+                    automation.pending = {action = action, sentAt = now}
+                    automation.attempts[token] = (automation.attempts[token] or 0) + 1
+                    local ok = pcall(function()
+                        if action.kind == "Submit" then remote:FireServer(id, "Submit", action.code)
+                        elseif action.kind == "Poster" then remote:FireServer(id, "Poster", action.index)
+                        else remote:FireServer(id, action.stepId) end
+                    end)
+                    if not ok then automation.pending = nil; automation.nextActionAt = now + 2 end
+                    return
+                end
+            else
+                local notices = {WAIT_CODE = "Aguardando codigo/cartazes carregarem.", WAIT_STATE = "Aguardando estado completo.",
+                    WAIT_SERVER = "Aguardando conclusao pelo servidor.", BAD_CONFIG = "Configuracao nao reconhecida.",
+                    BAD_STATE = "Contador fora do intervalo configurado.", EXHAUSTED = "Busca esgotada; precisamos revisar a pista."}
+                automation.details[id] = notices[reason] or "Aguardando..."
+            end
+        end
+    end
+    automation.status = "Aguardando dados ou confirmacao dos puzzles."
+    BasementSolver.releaseCamera(false)
+end
+
+table.insert(HubConnections, RunService.RenderStepped:Connect(function()
+    local automation = BasementState.automation
+    local lease = automation.cameraLease
+    if not lease or not lease.aim then return end
+    if not IsHubLoaded or not HubState.BasementAutoPuzzles or not HubState.BasementPuzzleTeleport then
+        BasementSolver.releaseCamera(false)
+    elseif LocalPlayer:GetAttribute("CutsceneActive") == true then
+        BasementSolver.releaseCamera(true)
+    elseif automation.active and lease.camera == workspace.CurrentCamera then
+        lease.camera.CFrame = lease.aim
+    end
+end))
+
+local basementPuzzleThread = task.spawn(function()
+    while IsHubLoaded do
+        task.wait(0.2)
+        local ok, err = pcall(BasementSolver.tick)
+        if not ok then
+            BasementState.automation.status = "Falha no solver; veja Atividade."
+            BasementSolver.releaseCamera(LocalPlayer:GetAttribute("CutsceneActive") == true)
+            if os.clock() - BasementState.automation.lastErrorAt >= 10 then
+                BasementState.automation.lastErrorAt = os.clock()
+                addLog("warn", "Auto Puzzles: " .. tostring(err))
+            end
+        end
+    end
+    BasementSolver.releaseCamera(false)
 end)
-table.insert(HubThreads, basementLeverThread)
+table.insert(HubThreads, basementPuzzleThread)
 
 local farmThread = task.spawn(function()
     while IsHubLoaded do
@@ -1907,7 +2388,8 @@ local farmThread = task.spawn(function()
             and LocalPlayer:GetAttribute("NeedleOwned") == true
             and BasementState.folder and BasementState.folder:GetAttribute("EscapeReady") == true
         if (HubState.AutoFarmHay or HubState.AutoSell) and IS_GAMEPLAY and not FarmRuntime.isCurrentlySelling
-            and not ToolRuntime.tntComboInProgress and not basementExitReady then
+            and not ToolRuntime.tntComboInProgress and not basementExitReady
+            and not BasementState.automation.active then
             local hrp = getHRP()
             local char = getCharacter()
 
@@ -2075,6 +2557,7 @@ local tntThread = task.spawn(function()
             and BasementState.folder and BasementState.folder:GetAttribute("EscapeReady") == true
         if HubState.AutoUseTnt and IS_GAMEPLAY and not FarmRuntime.isCurrentlySelling
             and not ToolRuntime.tntComboInProgress and not basementExitReady
+            and not BasementState.automation.active
             and not (NeedleProtection.anchor and not NeedleProtection.ready) then
             local hrp = getHRP()
             if hrp and isToolOwned("Tnt") then
@@ -2099,7 +2582,8 @@ table.insert(HubThreads, tntThread)
 local gemThread = task.spawn(function()
     while IsHubLoaded do
         task.wait(0.8)
-        if HubState.AutoCollectGems and IS_GAMEPLAY and Remotes.CollectGem then
+        if HubState.AutoCollectGems and IS_GAMEPLAY and Remotes.CollectGem
+            and not BasementState.automation.active then
             local gemsFolder = workspace:FindFirstChild("GemsClient")
             local hrp = getHRP()
             if gemsFolder and hrp then
@@ -2227,6 +2711,7 @@ local droneThread = task.spawn(function()
     while IsHubLoaded do
         task.wait(2.5)
         if HubState.AutoDeployDrone and IS_GAMEPLAY and Remotes.DeployDrone
+            and not BasementState.automation.active
             and not (NeedleProtection.anchor and not NeedleProtection.ready) then
             if isToolOwned("Drone") and LocalPlayer:GetAttribute("DroneDeployed") ~= true then
                 pcall(function() Remotes.DeployDrone:FireServer() end)
@@ -2857,6 +3342,7 @@ table.insert(HubThreads, espThread)
 -- 8.10 UNLOAD / DESTROY HUB
 local function unloadHub()
     addLog("warn", "Unloading Needle Hub completely...")
+    BasementSolver.releaseCamera(LocalPlayer:GetAttribute("CutsceneActive") == true)
     if ToolRuntime.stopVacuumAutomation then ToolRuntime.stopVacuumAutomation() end
     IsHubLoaded = false
 
@@ -4215,8 +4701,23 @@ local function buildNativeUI()
         if basementTab then
             addNativeSection(basementTab, "Capitulo 2: Porão", Color3.fromRGB(255, 190, 75))
             addNativeParagraph(basementTab, "Fluxo do capitulo",
-                "Encontre a chave no feno, acione as alavancas, resolva os 3 puzzles exigidos e abra a saida. O progresso abaixo vem do estado replicado pelo jogo.",
+                "Auto Farm + Auto Win encontram a chave. Auto Puzzles resolve alavancas, teclado, imagem e cores. Cores usa busca controlada e pode demorar; so o servidor confirma a conclusao.",
                 Color3.fromRGB(255, 190, 75))
+            addNativeToggle(basementTab, "Auto Puzzles", HubState.BasementAutoPuzzles, function(val)
+                HubState.BasementAutoPuzzles = val
+                if not val then
+                    BasementState.automation.active = false
+                    BasementState.automation.pending = nil
+                    BasementState.automation.currentAction = nil
+                    BasementSolver.releaseCamera(LocalPlayer:GetAttribute("CutsceneActive") == true)
+                end
+                addLog("info", "Auto Puzzles: " .. (val and "ligado" or "desligado"))
+            end)
+            addNativeToggle(basementTab, "Auto TP (puzzles)", HubState.BasementPuzzleTeleport, function(val)
+                HubState.BasementPuzzleTeleport = val
+                if not val then BasementSolver.releaseCamera(false) end
+            end)
+            local solverCard = addNativeParagraph(basementTab, "Auto Puzzles", "Desligado", Color3.fromRGB(99, 102, 241))
             local keyCard = addNativeParagraph(basementTab, "Chave", "Carregando estado...", Color3.fromRGB(255, 190, 75))
             local leverCard = addNativeParagraph(basementTab, "Alavancas", "Carregando estado...", Color3.fromRGB(255, 190, 75))
             local puzzleCards = {}
@@ -4229,10 +4730,6 @@ local function buildNativeUI()
             addNativeToggle(basementTab, "Destacar proximo objetivo no mapa", HubState.BasementGuideESP, function(val)
                 HubState.BasementGuideESP = val
             end)
-            addNativeToggle(basementTab, "Auto acionar alavancas ao mirar", HubState.BasementAutoLevers, function(val)
-                HubState.BasementAutoLevers = val
-                addLog("info", "Alavancas automaticas: " .. tostring(val))
-            end)
             addNativeButton(basementTab, "Sincronizar progresso dos puzzles", function()
                 if BasementState.remote and BasementState.remote:IsA("RemoteEvent") then
                     pcall(function() BasementState.remote:FireServer() end)
@@ -4242,6 +4739,7 @@ local function buildNativeUI()
             end)
             local basementStatusThread = task.spawn(function()
                 while IsHubLoaded and basementTab.Parent do
+                    solverCard.Text = BasementState.automation.status
                     local hayFolder = ReplicatedStorage:FindFirstChild("NeedleHaystack")
                     local keyOwned = LocalPlayer:GetAttribute("NeedleOwned") == true
                     local keyClaimed = hayFolder and hayFolder:GetAttribute("NeedleClaimed") == true
@@ -4265,7 +4763,8 @@ local function buildNativeUI()
                     for puzzleId, card in pairs(puzzleCards) do
                         local state = BasementState.snapshot and BasementState.snapshot[puzzleId]
                         card.Text = type(state) == "table" and (state.completed == true and "Concluido pelo servidor."
-                            or "Pendente. Interaja com as pistas e controles do puzzle.")
+                            or (HubState.BasementAutoPuzzles and BasementState.automation.details[puzzleId])
+                            or "Pendente. Ligue Auto Puzzles para resolver.")
                             or "Estado individual ainda nao sincronizado."
                     end
                     local escapeReady = BasementState.folder and BasementState.folder:GetAttribute("EscapeReady") == true

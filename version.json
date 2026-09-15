@@ -1,7 +1,7 @@
 {
-  "version": "6.19",
-  "versionNumber": 79,
+  "version": "6.20",
+  "versionNumber": 80,
   "gameCompatibility": "Lobby/Farmhouse v1068; Basement PlaceVersion 510 (dump 2026-09-13)",
   "releaseDate": "2026-09-15",
-  "releaseNotes": "Fixes script startup failing before the menu opens due to Luau's 200-local register limit. Groups internal state without changing gameplay behavior and adds a real Luau compilation check for main.lua and dumper.lua."
+  "releaseNotes": "Adds Basement Auto Puzzles: levers, poster collection and keypad submission from server-provided codes, picture tile alignment, and finite color-counter search. Optional puzzle teleport/aim pauses conflicting farm actions. Waits for server acknowledgement, backs off on failures, and restores camera on disable/unload. Color clue images are not decoded; color solving uses controlled combination search. Includes real Luau compilation and planner unit tests."
 }
