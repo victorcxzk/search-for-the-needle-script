@@ -1,5 +1,5 @@
 --[[
-    SEARCH FOR THE NEEDLE - ULTIMATE AUTOMATION HUB v6.16 PRO
+    SEARCH FOR THE NEEDLE - ULTIMATE AUTOMATION HUB v6.17 PRO
     Forensically Engineered from Luau Decompiler Bytecode Dump
     - Exact Multi-Grab Batching using LocalPlayer:GetAttribute("HayGrabCount") & getGrabCandidates
     - Rare / RGB priority via HayMutation and the game's value multipliers
@@ -130,7 +130,7 @@ else
     GAME_MODE_NAME = "Place " .. tostring(CURRENT_PLACE_ID)
 end
 local CURRENT_PLACE_NAME = GAME_MODE_NAME
-local SCRIPT_VERSION = "6.16"
+local SCRIPT_VERSION = "6.17"
 local CurrentContextMode = IS_LOBBY and "Lobby" or "Match"
 
 -- Require game Config if available for exact mathematical rainbow calculations
@@ -177,6 +177,15 @@ local FarmProgressState = {
     target = "aguardando",
     sector = nil,
     cycle = 1,
+}
+
+-- The target strand must not be consumed before its local reveal conditions
+-- are satisfied. This state lets every harvesting path protect that HayId.
+local NeedleProtection = {
+    targetId = nil,
+    anchor = nil,
+    localActions = 0,
+    ready = false,
 }
 
 local GemConfig = nil
@@ -989,14 +998,16 @@ local function getToolStatusSummary()
         cleared * 100, formatNumber(remaining), formatNumber(total)) or "indisponivel"
     local localText = FarmProgressState.localDepth
         and string.format("%.0f%%", FarmProgressState.localDepth * 100) or "aguardando"
+    local revealPercent = math.clamp(
+        tonumber(HaystackConfig and HaystackConfig.NEEDLE_REVEAL_FRACTION) or 0.75, 0.1, 1) * 100
     local targetText = FarmProgressState.target or "aguardando"
     if FarmProgressState.sector then
         targetText = targetText .. " S" .. tostring(FarmProgressState.sector)
             .. "/C" .. tostring(FarmProgressState.cycle or 1)
     end
-    return string.format("Modo: %s | Em uso: %s (slot %d) | Melhor: %s\nAspirador: %s | Forquilha: %s | TNT: %s | Drone: %s\nFeno removido: %s | Profundidade: %s (meta 75%%) | Alvo: %s",
+    return string.format("Modo: %s | Em uso: %s (slot %d) | Melhor: %s\nAspirador: %s | Forquilha: %s | TNT: %s | Drone: %s\nFeno removido: %s | Profundidade: %s (meta %.0f%%) | Alvo: %s",
         movementMode, curName, curSlot, bestName, vOwned, pOwned, tOwned, dOwned,
-        globalText, localText, targetText)
+        globalText, localText, revealPercent, targetText)
 end
 
 local function getHayHeld()
@@ -1133,7 +1144,7 @@ local function getGrabCandidates(primaryPart)
     for _, p in ipairs(parts) do
         if p ~= primaryPart and p.Parent == haystack and p:IsA("BasePart") then
             local hayId = p:GetAttribute("HayId")
-            if hayId then
+            if hayId and not (hayId == NeedleProtection.targetId and not NeedleProtection.ready) then
                 local dist = (p.Position - pos).Magnitude
                 if dist <= grabRadius then
                     table.insert(candidateList, {id = hayId, dist = dist})
@@ -1183,7 +1194,8 @@ local function getVacuumCandidateIds(primaryPart)
     local seen = {}
     local function addPart(part)
         local hayId = part and part:GetAttribute("HayId")
-        if type(hayId) == "number" and not seen[hayId] and #ids < 8 then
+        local protected = hayId == NeedleProtection.targetId and not NeedleProtection.ready
+        if type(hayId) == "number" and not protected and not seen[hayId] and #ids < 8 then
             seen[hayId] = true
             table.insert(ids, hayId)
         end
@@ -1213,6 +1225,7 @@ local function harvestWithEquippedTool(primaryPart)
     if not primaryPart or not primaryPart.Parent then return false end
     local hayId = primaryPart:GetAttribute("HayId")
     if type(hayId) ~= "number" then return false end
+    if hayId == NeedleProtection.targetId and not NeedleProtection.ready then return false end
 
     LocalPlayer:SetAttribute("HoveredHayId", hayId)
     local activeSlot = getCurrentEquippedSlot()
@@ -1365,6 +1378,10 @@ local function getKnownNeedleHayPart(haystack)
         cachedNeedleHayPart = nil
         cachedNeedleTargetPosition = nil
         lastNeedleHayLookupAt = 0
+        NeedleProtection.targetId = hayId
+        NeedleProtection.anchor = nil
+        NeedleProtection.localActions = 0
+        NeedleProtection.ready = false
         table.clear(autoFarmVisitedSectors)
         FarmProgressState.cycle = 1
     end
@@ -1480,12 +1497,12 @@ end
 
 -- When the player moves freely, harvest nearby hay at any height. The edge
 -- pattern is useful for autonomous TP digging, but must not gate local picks.
-local function chooseLocalHayPart(candidates, origin, maxDistance, haystack)
+local function chooseLocalHayPart(candidates, origin, maxDistance, haystack, excludedHayId)
     local chosen, bestScore = nil, -math.huge
     for _, part in ipairs(candidates) do
         if part:IsA("BasePart") and part.Parent == haystack then
             local hayId = part:GetAttribute("HayId")
-            if type(hayId) == "number" then
+            if type(hayId) == "number" and hayId ~= excludedHayId then
                 local distance = (part.Position - origin).Magnitude
                 if distance <= maxDistance then
                     local score = -distance - math.abs(part.Position.Y - origin.Y) * 0.12
@@ -1528,23 +1545,42 @@ end
 
 local function isNeedleAlreadyRevealed()
     local folder = ReplicatedStorage and ReplicatedStorage:FindFirstChild("NeedleHaystack")
-    if LocalPlayer:GetAttribute("NeedleOwned") == true then return true end
+    if LocalPlayer:GetAttribute("NeedleOwned") == true then
+        NeedleProtection.targetId = nil
+        NeedleProtection.anchor = nil
+        NeedleProtection.ready = true
+        return true
+    end
     if folder and folder:GetAttribute("NeedleRevealed") ~= nil then
-        return folder:GetAttribute("NeedleRevealed") == true
+        local revealed = folder:GetAttribute("NeedleRevealed") == true
+        if revealed then
+            NeedleProtection.targetId = nil
+            NeedleProtection.anchor = nil
+            NeedleProtection.ready = true
+        end
+        return revealed
     end
     return findVisibleNeedleObjective() ~= nil
 end
 
 local function getNeedleSlotAnchor()
+    local targetId = Landmarks.TargetNeedleHayId
     local slot = Landmarks.TargetNeedleSlot
     local center = HaystackConfig and HaystackConfig.PILE_CENTER
     local rendered = tonumber(HaystackConfig and HaystackConfig.RENDERED_HAY)
     local total = tonumber(HaystackConfig and HaystackConfig.TOTAL_HAY)
-    if not slot or typeof(center) ~= "Vector3" or not rendered or not total
-        or not HaystackSurface or type(HaystackSurface.slotPolar) ~= "function" then
-        return nil
-    end
+    if typeof(center) ~= "Vector3" or not rendered or not total
+        or not HaystackSurface or type(HaystackSurface.slotPolar) ~= "function" then return nil end
+    if not slot and type(targetId) ~= "number" then return nil end
     local slotCount = math.min(rendered, total)
+    if slotCount <= 0 then return nil end
+    if not slot then
+        -- Exact fallback used by NeedleHaystackClient when an ID has not entered
+        -- the rendered active set yet. This is the critical deep-layer case.
+        slot = (targetId - 1) % slotCount + 1
+        Landmarks.TargetNeedleSlot = slot
+        Landmarks.TargetNeedleGeneration = (targetId - 1) // slotCount
+    end
     local ok, radiusFraction, angle = pcall(HaystackSurface.slotPolar, slot, slotCount, 11, 0)
     if not ok or type(radiusFraction) ~= "number" or type(angle) ~= "number" then return nil end
     local radius = radiusFraction * (tonumber(HaystackConfig.PILE_RADIUS) or 17)
@@ -1571,17 +1607,31 @@ local function getNeedleDigAnchor(haystack)
     if not cachedNeedleTargetPosition then
         cachedNeedleTargetPosition = getNeedleSlotAnchor()
     end
+    NeedleProtection.targetId = Landmarks.TargetNeedleHayId
+    NeedleProtection.anchor = cachedNeedleTargetPosition
     return cachedNeedleTargetPosition, targetPart
 end
 
 local function selectNeedleAreaHay(haystack, anchor, targetPart)
-    if targetPart and targetPart.Parent == haystack then return targetPart end
+    local protectedId = not NeedleProtection.ready and NeedleProtection.targetId or nil
+    if NeedleProtection.ready and targetPart and targetPart.Parent == haystack then return targetPart end
     local digRadius = tonumber(HaystackConfig and HaystackConfig.NEEDLE_DIG_RADIUS) or 5.5
     local nearby = getNearbyHayParts(anchor, digRadius, 0)
-    local chosen = chooseLocalHayPart(nearby, anchor, digRadius, haystack)
+    local chosen = chooseLocalHayPart(nearby, anchor, digRadius, haystack, protectedId)
     if chosen then return chosen end
     -- Account for vertical settling after the original target strand disappears.
-    return chooseLocalHayPart(haystack:GetChildren(), anchor, digRadius * 1.5, haystack)
+    return chooseLocalHayPart(haystack:GetChildren(), anchor, digRadius * 1.5, haystack, protectedId)
+end
+
+local function recordNeedleAreaAction(position, hayId)
+    local anchor = NeedleProtection.anchor
+    if NeedleProtection.ready or not anchor or typeof(position) ~= "Vector3"
+        or hayId == NeedleProtection.targetId then return end
+    local digRadius = tonumber(HaystackConfig and HaystackConfig.NEEDLE_DIG_RADIUS) or 5.5
+    local dx, dz = position.X - anchor.X, position.Z - anchor.Z
+    if math.sqrt(dx * dx + dz * dz) <= digRadius then
+        NeedleProtection.localActions = NeedleProtection.localActions + 1
+    end
 end
 
 local function chooseAutoFarmHayPart(haystack, hrp, reach)
@@ -1604,7 +1654,18 @@ local function chooseAutoFarmHayPart(haystack, hrp, reach)
             clearAutoFarmCorner(true)
             setAutoFarmCorner(needleAnchor, nil, "needle")
         end
-        FarmProgressState.localDepth = getDigDepthFraction(needleAnchor)
+        local needleDepth = getDigDepthFraction(needleAnchor)
+        FarmProgressState.localDepth = needleDepth
+        local requiredActions = tonumber(HaystackConfig and HaystackConfig.NEEDLE_LOCAL_PICKS_REQUIRED) or 18
+        if needleDepth and needleDepth >= AUTO_FARM_TARGET_DEPTH
+            and NeedleProtection.localActions >= requiredActions then
+            NeedleProtection.ready = true
+        end
+        FarmProgressState.target = string.format("%s L%d %d/%d%s",
+            IS_BASEMENT and "chave" or "agulha",
+            (tonumber(Landmarks.TargetNeedleGeneration) or 0) + 1,
+            math.min(NeedleProtection.localActions, requiredActions), requiredActions,
+            NeedleProtection.ready and " pronta" or " protegida")
         local needleAreaTarget = selectNeedleAreaHay(haystack, needleAnchor, targetPart)
         if needleAreaTarget then
             local shouldTeleport = (needleAreaTarget.Position - hrp.Position).Magnitude > reach
@@ -1658,6 +1719,7 @@ end
 chooseTntTarget = function(hrp)
     local haystack = workspace:FindFirstChild("HaystackClient")
     if not haystack then return nil end
+    if NeedleProtection.anchor and not NeedleProtection.ready then return nil end
     local origin = hrp.Position + Vector3.new(0, 2.5, 0)
     local feasibleNormal = {}
     if HubState.PrioritizeRGB then
@@ -1878,7 +1940,11 @@ local farmThread = task.spawn(function()
                     -- 1. Intelligent Tool Recognition & Auto-Equip
                     local activeSlot = getCurrentEquippedSlot()
                     if HubState.AutoEquipBestTool then
-                        local bestSlot, bestName = getBestAvailableToolSlot()
+                        -- Hand picks let us exclude the hidden target ID while
+                        -- satisfying its depth/pick requirements. Wide tools can
+                        -- consume it prematurely and force a server retarget.
+                        local bestSlot = NeedleProtection.anchor and not NeedleProtection.ready
+                            and SLOT_HAND or getBestAvailableToolSlot()
                         if activeSlot ~= bestSlot then
                             if equipToolSlot(bestSlot) then
                                 activeSlot = getCurrentEquippedSlot()
@@ -1892,7 +1958,8 @@ local farmThread = task.spawn(function()
                     -- 2. Rare strands anywhere in the rendered pile, constrained
                     -- only by the active tool's real reach in no-teleport mode.
                     local rgbStrands = {}
-                    if HubState.PrioritizeRGB then
+                    if HubState.PrioritizeRGB
+                        and not (NeedleProtection.anchor and not NeedleProtection.ready) then
                         rgbStrands = getAllRainbowStrands()
                     end
 
@@ -1950,6 +2017,7 @@ local farmThread = task.spawn(function()
                                 local selectedHayId = primaryPart:GetAttribute("HayId")
                                 if harvestWithEquippedTool(primaryPart) then
                                     lastDigHayId = selectedHayId
+                                    recordNeedleAreaAction(primaryPart.Position, selectedHayId)
                                 end
                             elseif HubState.NoTeleportMode and os.clock() - lastNoReachNoticeAt >= 8 then
                                 lastNoReachNoticeAt = os.clock()
@@ -1985,7 +2053,8 @@ local tntThread = task.spawn(function()
             and LocalPlayer:GetAttribute("NeedleOwned") == true
             and BasementPuzzlesFolder and BasementPuzzlesFolder:GetAttribute("EscapeReady") == true
         if HubState.AutoUseTnt and IS_GAMEPLAY and not isCurrentlySelling
-            and not TntComboInProgress and not basementExitReady then
+            and not TntComboInProgress and not basementExitReady
+            and not (NeedleProtection.anchor and not NeedleProtection.ready) then
             local hrp = getHRP()
             if hrp and isToolOwned("Tnt") then
                 local currentHay = getHayHeld()
@@ -2136,7 +2205,8 @@ table.insert(HubThreads, needleThread)
 local droneThread = task.spawn(function()
     while IsHubLoaded do
         task.wait(2.5)
-        if HubState.AutoDeployDrone and IS_GAMEPLAY and Remotes.DeployDrone then
+        if HubState.AutoDeployDrone and IS_GAMEPLAY and Remotes.DeployDrone
+            and not (NeedleProtection.anchor and not NeedleProtection.ready) then
             if isToolOwned("Drone") and LocalPlayer:GetAttribute("DroneDeployed") ~= true then
                 pcall(function() Remotes.DeployDrone:FireServer() end)
                 addLog("info", "Auto-deployed Hay Drone companion!")
