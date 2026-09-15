@@ -6,9 +6,43 @@ function Solver.isTaken(taken, index)
     return type(taken) == "table" and (taken[index] == true or taken[tostring(index)] == true)
 end
 
+function Solver.leverIndex(step)
+    local model = step.Model
+    if type(model) == "table" then model = model[#model] end
+    return tonumber(tostring(model or ""):match("Lever(%d+)$"))
+        or tonumber(tostring(step.Id or ""):match("(%d+)$"))
+end
+
+function Solver.mergeLeverState(definition, state, attributes)
+    local copy = type(state) == "table" and table.clone(state) or {}
+    copy.completed = copy.completed == true or attributes.LeverPuzzleSolved == true
+    copy.steps = table.clone(type(copy.steps) == "table" and copy.steps or {})
+    for _, step in ipairs(definition and definition.Steps or {}) do
+        local index = Solver.leverIndex(step)
+        if index and attributes["Lever" .. index .. "Pulled"] == true then copy.steps[step.Id] = true end
+    end
+    return copy
+end
+
+function Solver.phase(leverSolved, now, doorReadyAt, states, requiredPuzzles)
+    if leverSolved ~= true then return "LEVERS", "LeverPuzzle" end
+    if now < (doorReadyAt or 0) then return "DOOR" end
+    for _, id in ipairs(requiredPuzzles) do
+        local state = states and states[id]
+        if type(state) ~= "table" or state.completed ~= true then return "PUZZLE", id end
+    end
+    return "DONE"
+end
+
 function Solver.lever(definition, state)
     if state.completed == true then return nil, "DONE" end
-    for _, step in ipairs(definition.Steps or {}) do
+    local steps = table.clone(definition.Steps or {})
+    table.sort(steps, function(a, b)
+        local first, second = Solver.leverIndex(a) or math.huge, Solver.leverIndex(b) or math.huge
+        if first ~= second then return first < second end
+        return tostring(a.Id) < tostring(b.Id)
+    end)
+    for _, step in ipairs(steps) do
         if not (state.steps and state.steps[step.Id]) then
             return {kind = "Lever", puzzleId = "LeverPuzzle", stepId = step.Id, model = step.Model}
         end

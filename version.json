@@ -1,7 +1,7 @@
 {
-  "version": "6.20",
-  "versionNumber": 80,
+  "version": "6.21",
+  "versionNumber": 81,
   "gameCompatibility": "Lobby/Farmhouse v1068; Basement PlaceVersion 510 (dump 2026-09-13)",
   "releaseDate": "2026-09-15",
-  "releaseNotes": "Adds Basement Auto Puzzles: levers, poster collection and keypad submission from server-provided codes, picture tile alignment, and finite color-counter search. Optional puzzle teleport/aim pauses conflicting farm actions. Waits for server acknowledgement, backs off on failures, and restores camera on disable/unload. Color clue images are not decoded; color solving uses controlled combination search. Includes real Luau compilation and planner unit tests."
+  "releaseNotes": "Fixes Auto Puzzles waiting for the key before starting. Pulls lever 1, then levers 2 and 3, acknowledges replicated pulled attributes even without a lever snapshot, waits for LeverPuzzleSolved and sliding-door animation, and follows the release configuration's puzzle order. Lever interactions now mirror the client: model-pivot distance and aim, without an incorrect raycast gate."
 }

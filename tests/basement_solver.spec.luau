@@ -10,6 +10,30 @@ local lever = Solver.lever(leverDefinition, {steps = {Lever1 = true, Lever2 = fa
 check(lever.stepId == "Lever2", "false steps must not count as solved")
 check(not Solver.acknowledged(lever, {steps = {Lever2 = false}}), "sending does not acknowledge a lever")
 check(Solver.acknowledged(lever, {steps = {Lever2 = true}}), "server step acknowledges lever")
+local reversed = {Steps = {{Id = "third", Model = {"Levers", "Lever3"}},
+    {Id = "second", Model = "Levers.Lever2"}, {Id = "first", Model = "Levers.Lever1"}}}
+local leverState = Solver.mergeLeverState(reversed, nil, {LeverPuzzleSolved = false})
+lever = Solver.lever(reversed, leverState)
+check(lever.stepId == "first", "first lever must precede the remaining two, even with shuffled config")
+leverState = Solver.mergeLeverState(reversed, nil, {Lever1Pulled = true, Lever2Pulled = false})
+lever = Solver.lever(reversed, leverState)
+check(lever.stepId == "second", "replicated attributes work without a PuzzleState snapshot")
+leverState = Solver.mergeLeverState(reversed, leverState, {Lever1Pulled = true, Lever2Pulled = true})
+lever = Solver.lever(reversed, leverState)
+check(lever.stepId == "third", "third lever must follow the first two")
+check(Solver.acknowledged(lever, Solver.mergeLeverState(reversed, nil, {Lever3Pulled = true})),
+    "replicated pulled attribute acknowledges a lever")
+local phase, id = Solver.phase(false, 100, nil, {LeverPuzzle = {completed = true}}, {"ColorPuzzle", "PicturePuzzle", "NumberPuzzle"})
+check(phase == "LEVERS" and id == "LeverPuzzle", "do not pass the gate before LeverPuzzleSolved is replicated")
+phase, id = Solver.phase(true, 100, 105.95, {}, {"ColorPuzzle", "PicturePuzzle", "NumberPuzzle"})
+check(phase == "DOOR" and id == nil, "wait for sliding door animation before acting inside")
+phase, id = Solver.phase(true, 106, 105.95, {}, {"ColorPuzzle", "PicturePuzzle", "NumberPuzzle"})
+check(phase == "PUZZLE" and id == "ColorPuzzle", "use release-config order, not arbitrary keypad-first order")
+phase, id = Solver.phase(true, 106, nil, {ColorPuzzle = {completed = true}}, {"ColorPuzzle", "PicturePuzzle", "NumberPuzzle"})
+check(id == "PicturePuzzle", "do not skip locked puzzle stages")
+phase, id = Solver.phase(true, 106, nil, {ColorPuzzle = {completed = true}, PicturePuzzle = {completed = true}},
+    {"ColorPuzzle", "PicturePuzzle", "NumberPuzzle"})
+check(id == "NumberPuzzle", "keypad follows preceding stages")
 
 local numberDefinition = {CodeLength = 4}
 local originalNumberState = {code = "", taken = {[1] = true}}
