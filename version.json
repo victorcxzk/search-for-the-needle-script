@@ -1,7 +1,7 @@
 {
-  "version": "6.17",
-  "versionNumber": 77,
+  "version": "6.18",
+  "versionNumber": 78,
   "gameCompatibility": "Lobby/Farmhouse v1068; Basement PlaceVersion 510 (dump 2026-09-13)",
   "releaseDate": "2026-09-14",
-  "releaseNotes": "Fixes deep-layer needle targeting: when needleHayId is not in the rendered active set, the hub now reconstructs its slot with the same modulo/generation fallback used by NeedleHaystackClient. The hidden target strand is protected until both live local depth and the required local action count are satisfied; safe hand digging temporarily overrides wide tools, rares, TNT, and new drone deployment around the locked region to prevent premature target consumption and repeated server retargets."
+  "releaseNotes": "Fixes TNT throws using the lowest-angle ballistic solution at near-full legal speed. Close targets directly below the player are thrown straight into the hay, eliminating the exaggerated upward lob before the stick falls back down."
 }

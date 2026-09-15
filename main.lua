@@ -1,5 +1,5 @@
 --[[
-    SEARCH FOR THE NEEDLE - ULTIMATE AUTOMATION HUB v6.17 PRO
+    SEARCH FOR THE NEEDLE - ULTIMATE AUTOMATION HUB v6.18 PRO
     Forensically Engineered from Luau Decompiler Bytecode Dump
     - Exact Multi-Grab Batching using LocalPlayer:GetAttribute("HayGrabCount") & getGrabCandidates
     - Rare / RGB priority via HayMutation and the game's value multipliers
@@ -130,7 +130,7 @@ else
     GAME_MODE_NAME = "Place " .. tostring(CURRENT_PLACE_ID)
 end
 local CURRENT_PLACE_NAME = GAME_MODE_NAME
-local SCRIPT_VERSION = "6.17"
+local SCRIPT_VERSION = "6.18"
 local CurrentContextMode = IS_LOBBY and "Lobby" or "Match"
 
 -- Require game Config if available for exact mathematical rainbow calculations
@@ -885,22 +885,34 @@ end
 local chooseTntTarget
 local function solveTntVelocity(origin, target)
     local delta = target - origin
-    local gravity = workspace.Gravity
+    local gravity = math.max(tonumber(workspace.Gravity) or 196.2, 1)
     local minSpeed = tonumber(HaystackConfig and HaystackConfig.TNT_MIN_THROW_SPEED) or 26
     local maxSpeed = tonumber(HaystackConfig and HaystackConfig.TNT_MAX_THROW_SPEED) or 78
-    local chosen, bestCost = nil, math.huge
-    for step = 6, 30 do
-        local flightTime = step * 0.05
-        local velocity = Vector3.new(delta.X / flightTime,
-            delta.Y / flightTime + gravity * flightTime * 0.5,
-            delta.Z / flightTime)
-        local speed = velocity.Magnitude
-        if speed >= minSpeed and speed <= maxSpeed then
-            local cost = math.abs(speed - 52) + flightTime * 2
-            if cost < bestCost then chosen, bestCost = velocity, cost end
-        end
+    if delta.Magnitude < 0.05 then return nil end
+
+    local flat = Vector3.new(delta.X, 0, delta.Z)
+    local horizontalDistance = flat.Magnitude
+    if horizontalDistance < 0.35 then
+        -- Auto Farm is usually standing directly above the selected strand.
+        -- Throw into the hay instead of manufacturing an upward arc first.
+        local directSpeed = math.clamp(delta.Magnitude * 8, minSpeed, maxSpeed * 0.98)
+        return delta.Unit * directSpeed
     end
-    return chosen
+
+    -- Lowest-angle ballistic solution at near-full legal speed. Of the two
+    -- possible arcs this is the flat one, so the stick travels toward the hay
+    -- instead of visibly launching upward and dropping back down.
+    local speed = math.max(minSpeed, maxSpeed * 0.98)
+    local speedSquared = speed * speed
+    local discriminant = speedSquared * speedSquared
+        - gravity * (gravity * horizontalDistance * horizontalDistance
+            + 2 * delta.Y * speedSquared)
+    if discriminant < 0 then return nil end
+    local tangent = (speedSquared - math.sqrt(discriminant))
+        / (gravity * horizontalDistance)
+    local horizontalSpeed = speed / math.sqrt(1 + tangent * tangent)
+    local verticalSpeed = horizontalSpeed * tangent
+    return flat.Unit * horizontalSpeed + Vector3.new(0, verticalSpeed, 0)
 end
 
 local function throwTntAt(targetPos)
@@ -951,7 +963,7 @@ local function throwTntAt(targetPos)
         addLog("info", "TNT nao foi acesa pelo servidor; aguardando proximo cooldown.")
         return false
     end
-    addLog("info", "TNT acesa; calculando arremesso ao feno.")
+    addLog("info", "TNT acesa; preparando arremesso direto ao feno.")
 
     task.wait(tonumber(HaystackConfig and HaystackConfig.TNT_LIGHT_TIME) or 0.48)
     if not IsHubLoaded then
@@ -973,7 +985,7 @@ local function throwTntAt(targetPos)
     local thrown = pcall(function()
         tntAction:FireServer("throw", throwCF, vel)
     end)
-    if thrown then addLog("info", "TNT arremessada para o feno alcancavel; aguardando resultado do servidor.") end
+    if thrown then addLog("info", "TNT arremessada em trajetoria baixa direto ao feno.") end
 
     task.wait(0.2)
     equipToolSlot(getBestHarvestToolSlot(), true)
