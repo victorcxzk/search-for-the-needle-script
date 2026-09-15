@@ -1,5 +1,5 @@
 --[[
-    SEARCH FOR THE NEEDLE - ULTIMATE AUTOMATION HUB v6.24 PRO
+    SEARCH FOR THE NEEDLE - ULTIMATE AUTOMATION HUB v6.25 PRO
     Forensically Engineered from Luau Decompiler Bytecode Dump
     - Exact Multi-Grab Batching using LocalPlayer:GetAttribute("HayGrabCount") & getGrabCandidates
     - Rare / RGB priority via HayMutation and the game's value multipliers
@@ -131,7 +131,7 @@ else
     GAME_MODE_NAME = "Place " .. tostring(CURRENT_PLACE_ID)
 end
 local CURRENT_PLACE_NAME = GAME_MODE_NAME
-local SCRIPT_VERSION = "6.24"
+local SCRIPT_VERSION = "6.25"
 local CurrentContextMode = IS_LOBBY and "Lobby" or "Match"
 
 -- Require game Config if available for exact mathematical rainbow calculations
@@ -3255,8 +3255,17 @@ local function requestBarnToolPurchase(itemId, manual)
         if manual then addLog("warn", info.displayName .. " so tem opcao Robux: " .. formatBarnToolPrice(info) .. ". Use a loja oficial do jogo para confirmar a compra.") end
         return false, "ROBUX_ONLY"
     end
-    if not manual and option.currency == "Gems" then return false, "GEMS_AUTO_DISABLED" end
-    local balance = option.currency == "Gems" and getGemBalance() or getCashBalance()
+    if not manual and option.currency == "Gems" then
+        -- Auto Buy may spend gems only on the explicitly requested round Drone.
+        -- Read its live price, but never exceed the authorized 40-gem purchase.
+        if itemId ~= "Drone" then return false, "GEMS_AUTO_DISABLED" end
+        if option.price < 1 or option.price > 40 or option.price % 1 ~= 0 then return false, "PRICE" end
+    end
+    -- The in-match shop uses the player's replicated Gems attribute. Prefer it
+    -- over a potentially lagging account/reactive snapshot for this purchase.
+    local balance = option.currency == "Gems"
+        and math.max(0, math.floor(tonumber(LocalPlayer:GetAttribute("Gems")) or getGemBalance()))
+        or getCashBalance()
     if balance < option.price then
         if manual then
             addLog("warn", string.format("Saldo insuficiente: %s custa %s; faltam %s.", info.displayName, formatShopOption(option), formatShopOption({currency = option.currency, price = option.price - balance})))
@@ -3269,7 +3278,9 @@ local function requestBarnToolPurchase(itemId, manual)
         Remotes.BuyShopItem:FireServer(itemId)
     end)
     if not ok then PendingToolPurchases[itemId] = nil end
-    if manual and ok then addLog("info", "Compra solicitada: " .. info.displayName .. " por " .. formatShopOption(option) .. ".") end
+    if ok and (manual or (itemId == "Drone" and option.currency == "Gems")) then
+        addLog("info", "Compra solicitada: " .. info.displayName .. " por " .. formatShopOption(option) .. ".")
+    end
     return ok, ok and "SENT" or "ERROR"
 end
 
@@ -4960,7 +4971,7 @@ local function buildNativeUI()
         -- 2. Barn Shop Tab (live prices and ownership from the match)
         addNativeSection(shopTab, "Ferramentas do Celeiro", Color3.fromRGB(99, 102, 241))
         local matchCashCard = addNativeParagraph(shopTab, "Saldo da partida", formatCash(getCashBalance()) .. " moedas | " .. formatNumber(getGemBalance()) .. " gemas. Opcoes da loja oficial.", Color3.fromRGB(99, 102, 241))
-        addNativeParagraph(shopTab, "Compra automatica segura", "Tenta Forquilha > TNT > Drone > Aspirador. Usa apenas moedas da partida; nunca abre Robux nem gasta gemas automaticamente.", Color3.fromRGB(99, 102, 241))
+        addNativeParagraph(shopTab, "Compra automatica segura", "Tenta Forquilha > TNT > Drone > Aspirador. Usa moedas da partida e ate 40 diamantes no Drone. Nunca abre Robux nem gasta gemas em outros itens automaticamente.", Color3.fromRGB(99, 102, 241))
         
         local toolPurchaseButtons = {}
         for _, toolId in ipairs(barnToolNames) do

@@ -1,7 +1,7 @@
 {
-  "version": "6.24",
-  "versionNumber": 84,
+  "version": "6.25",
+  "versionNumber": 85,
   "gameCompatibility": "Lobby/Farmhouse v1068; Basement PlaceVersion 510 (dump 2026-09-13)",
   "releaseDate": "2026-09-15",
-  "releaseNotes": "Auto Puzzles now finishes Basement by using the owned key at the trapdoor after all three server-confirmed puzzles and EscapeReady. With puzzle Auto TP enabled, approaches the ladder from below the ceiling, equips the key and aims at the keyhole. Shares one hand-in engine with AutoWin to prevent duplicate requests, pauses farm/TNT/gems/buy/equip during exit, bounds retries and yields camera control to the game's ending scene. Waits for the key when missing and stops actions on actual round completion. Does not automatically return to the lobby; preserves the color clue solver and roaming farm."
+  "releaseNotes": "Allows Auto Buy to purchase the round Drone with its live Gems price, capped at the requested 40 diamonds. Uses the current replicated in-match gem balance before account-cache fallback, waits for sufficient funds, and retains owned/pending purchase guards. Robux-only items and automatic gem purchases for other tools remain blocked. Updates the shop explanation and logs the automatic Drone request. Preserves puzzle solving, automatic Basement exit, TNT and whole-pile farm roaming."
 }
