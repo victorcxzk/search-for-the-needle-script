@@ -1,5 +1,5 @@
 --[[
-    SEARCH FOR THE NEEDLE - ULTIMATE AUTOMATION HUB v6.18 PRO
+    SEARCH FOR THE NEEDLE - ULTIMATE AUTOMATION HUB v6.19 PRO
     Forensically Engineered from Luau Decompiler Bytecode Dump
     - Exact Multi-Grab Batching using LocalPlayer:GetAttribute("HayGrabCount") & getGrabCandidates
     - Rare / RGB priority via HayMutation and the game's value multipliers
@@ -130,7 +130,7 @@ else
     GAME_MODE_NAME = "Place " .. tostring(CURRENT_PLACE_ID)
 end
 local CURRENT_PLACE_NAME = GAME_MODE_NAME
-local SCRIPT_VERSION = "6.18"
+local SCRIPT_VERSION = "6.19"
 local CurrentContextMode = IS_LOBBY and "Lobby" or "Match"
 
 -- Require game Config if available for exact mathematical rainbow calculations
@@ -616,40 +616,42 @@ if Remotes.NeedleFound then
     table.insert(HubConnections, conn)
 end
 
-local BasementPuzzlesFolder = IS_BASEMENT and ReplicatedStorage:WaitForChild("Puzzles", 10) or nil
-local BasementPuzzleSnapshot = nil
-local BasementRequiredPuzzles = {"ColorPuzzle", "PicturePuzzle", "NumberPuzzle"}
-local BasementPuzzleConfig = nil
-local PuzzleStateRemote = BasementPuzzlesFolder and BasementPuzzlesFolder:WaitForChild("PuzzleState", 5) or nil
-if IS_BASEMENT and BasementPuzzlesFolder then
-    local puzzleConfigModule = BasementPuzzlesFolder:WaitForChild("PuzzleConfig", 5)
+local BasementState = {
+    folder = IS_BASEMENT and ReplicatedStorage:WaitForChild("Puzzles", 10) or nil,
+    snapshot = nil,
+    requiredPuzzles = {"ColorPuzzle", "PicturePuzzle", "NumberPuzzle"},
+    config = nil,
+}
+BasementState.remote = BasementState.folder and BasementState.folder:WaitForChild("PuzzleState", 5) or nil
+if IS_BASEMENT and BasementState.folder then
+    local puzzleConfigModule = BasementState.folder:WaitForChild("PuzzleConfig", 5)
     if puzzleConfigModule and puzzleConfigModule:IsA("ModuleScript") then
         local ok, config = pcall(require, puzzleConfigModule)
-        if ok and type(config) == "table" then BasementPuzzleConfig = config end
+        if ok and type(config) == "table" then BasementState.config = config end
     end
-    local releaseConfigModule = BasementPuzzlesFolder:WaitForChild("Chapter2ReleaseConfig", 5)
+    local releaseConfigModule = BasementState.folder:WaitForChild("Chapter2ReleaseConfig", 5)
     if releaseConfigModule and releaseConfigModule:IsA("ModuleScript") then
         local ok, config = pcall(require, releaseConfigModule)
         if ok and type(config) == "table" and type(config.RequiredPuzzles) == "table" then
-            BasementRequiredPuzzles = config.RequiredPuzzles
+            BasementState.requiredPuzzles = config.RequiredPuzzles
         end
     end
-    if PuzzleStateRemote and PuzzleStateRemote:IsA("RemoteEvent") then
-        local conn = PuzzleStateRemote.OnClientEvent:Connect(function(snapshot)
-            if type(snapshot) == "table" then BasementPuzzleSnapshot = snapshot end
+    if BasementState.remote and BasementState.remote:IsA("RemoteEvent") then
+        local conn = BasementState.remote.OnClientEvent:Connect(function(snapshot)
+            if type(snapshot) == "table" then BasementState.snapshot = snapshot end
         end)
         table.insert(HubConnections, conn)
-        local solvedRemote = BasementPuzzlesFolder:FindFirstChild("PuzzleSolved")
+        local solvedRemote = BasementState.folder:FindFirstChild("PuzzleSolved")
         if solvedRemote and solvedRemote:IsA("RemoteEvent") then
             local solvedConn = solvedRemote.OnClientEvent:Connect(function()
                 task.delay(0.15, function()
-                    if IsHubLoaded then pcall(function() PuzzleStateRemote:FireServer() end) end
+                    if IsHubLoaded then pcall(function() BasementState.remote:FireServer() end) end
                 end)
             end)
             table.insert(HubConnections, solvedConn)
         end
         task.defer(function()
-            if IsHubLoaded then pcall(function() PuzzleStateRemote:FireServer() end) end
+            if IsHubLoaded then pcall(function() BasementState.remote:FireServer() end) end
         end)
     end
 end
@@ -731,16 +733,26 @@ local ToolOwnershipAttributes = {
     Needle = {"NeedleOwned"},
 }
 
-local CachedHotbarSlots = nil
+-- Shared state tables keep this chunk below Luau's 200-local register limit.
+local ToolRuntime = {
+    hotbarSlots = nil,
+    lastEquippedSlotLogged = -1,
+    lastEquipAttemptAt = 0,
+    stopVacuumAutomation = nil,
+    tntComboInProgress = false,
+    lastAutoTntThrow = 0,
+    vacuumAutomationActive = false,
+    lastPitchforkDigAt = 0,
+}
 local function getHotbarSlots()
-    if CachedHotbarSlots then return CachedHotbarSlots end
+    if ToolRuntime.hotbarSlots then return ToolRuntime.hotbarSlots end
     local ps = LocalPlayer:FindFirstChild("PlayerScripts")
     if ps then
         local mod = ps:FindFirstChild("HotbarSlots")
         if mod and mod:IsA("ModuleScript") then
             local ok, res = pcall(require, mod)
             if ok and type(res) == "table" then
-                CachedHotbarSlots = res
+                ToolRuntime.hotbarSlots = res
                 return res
             end
         end
@@ -751,7 +763,7 @@ local function getHotbarSlots()
         if mod and mod:IsA("ModuleScript") then
             local ok, res = pcall(require, mod)
             if ok and type(res) == "table" then
-                CachedHotbarSlots = res
+                ToolRuntime.hotbarSlots = res
                 return res
             end
         end
@@ -837,11 +849,6 @@ local function getBestHarvestToolSlot()
     return SLOT_HAND
 end
 
-local lastEquippedSlotLogged = -1
-local lastEquipAttemptAt = 0
-local stopVacuumAutomation
-local TntComboInProgress = false
-local lastAutoTntThrow = 0
 local function equipToolSlot(slotIndex, silent)
     if not slotIndex or type(slotIndex) ~= "number" then return false end
     local toolId = SlotToolIds[slotIndex]
@@ -854,10 +861,10 @@ local function equipToolSlot(slotIndex, silent)
 
     local currentSlot = getCurrentEquippedSlot()
     if currentSlot == slotIndex then return true end
-    if os.clock() - lastEquipAttemptAt < 0.18 then return false end
-    lastEquipAttemptAt = os.clock()
-    if currentSlot == SLOT_VACUUM and slotIndex ~= SLOT_VACUUM and stopVacuumAutomation then
-        stopVacuumAutomation()
+    if os.clock() - ToolRuntime.lastEquipAttemptAt < 0.18 then return false end
+    ToolRuntime.lastEquipAttemptAt = os.clock()
+    if currentSlot == SLOT_VACUUM and slotIndex ~= SLOT_VACUUM and ToolRuntime.stopVacuumAutomation then
+        ToolRuntime.stopVacuumAutomation()
     end
 
     -- The game's HotbarSlots module owns availability and equipped state.
@@ -867,8 +874,8 @@ local function equipToolSlot(slotIndex, silent)
             hotbar.setEquipped(slotIndex, true)
         end)
         if ok and getCurrentEquippedSlot() == slotIndex then
-            if not silent and lastEquippedSlotLogged ~= slotIndex then
-                lastEquippedSlotLogged = slotIndex
+            if not silent and ToolRuntime.lastEquippedSlotLogged ~= slotIndex then
+                ToolRuntime.lastEquippedSlotLogged = slotIndex
                 addLog("info", "Ferramenta equipada: " .. (ToolNames[slotIndex] or ("Slot " .. tostring(slotIndex))))
             end
             return true
@@ -916,7 +923,7 @@ local function solveTntVelocity(origin, target)
 end
 
 local function throwTntAt(targetPos)
-    if TntComboInProgress then return false end
+    if ToolRuntime.tntComboInProgress then return false end
     if not isToolOwned("Tnt") then
         addLog("warn", "TNT is not owned. Purchase it from the Barn shop!")
         return false
@@ -937,10 +944,10 @@ local function throwTntAt(targetPos)
         return false
     end
 
-    TntComboInProgress = true
-    if stopVacuumAutomation then stopVacuumAutomation() end
+    ToolRuntime.tntComboInProgress = true
+    if ToolRuntime.stopVacuumAutomation then ToolRuntime.stopVacuumAutomation() end
     if not equipToolSlot(SLOT_TNT, true) then
-        TntComboInProgress = false
+        ToolRuntime.tntComboInProgress = false
         return false
     end
     task.wait(0.06)
@@ -958,8 +965,8 @@ local function throwTntAt(targetPos)
     acknowledgement:Disconnect()
     if lightResult ~= true then
         equipToolSlot(getBestHarvestToolSlot(), true)
-        TntComboInProgress = false
-        lastAutoTntThrow = os.clock()
+        ToolRuntime.tntComboInProgress = false
+        ToolRuntime.lastAutoTntThrow = os.clock()
         addLog("info", "TNT nao foi acesa pelo servidor; aguardando proximo cooldown.")
         return false
     end
@@ -967,7 +974,7 @@ local function throwTntAt(targetPos)
 
     task.wait(tonumber(HaystackConfig and HaystackConfig.TNT_LIGHT_TIME) or 0.48)
     if not IsHubLoaded then
-        TntComboInProgress = false
+        ToolRuntime.tntComboInProgress = false
         return false
     end
 
@@ -989,8 +996,8 @@ local function throwTntAt(targetPos)
 
     task.wait(0.2)
     equipToolSlot(getBestHarvestToolSlot(), true)
-    TntComboInProgress = false
-    if thrown then lastAutoTntThrow = os.clock() end
+    ToolRuntime.tntComboInProgress = false
+    if thrown then ToolRuntime.lastAutoTntThrow = os.clock() end
     return thrown
 end
 
@@ -1178,26 +1185,24 @@ end
 
 -- Tool-specific harvesting must mirror the live clients. Mixing PickHay with a
 -- pitchfork/vacuum action makes the server resolve the same strand as a hand pick.
-local VacuumAutomationActive = false
-local LastPitchforkDigAt = 0
 
-stopVacuumAutomation = function()
-    if VacuumAutomationActive and Remotes.VacuumAction then
+ToolRuntime.stopVacuumAutomation = function()
+    if ToolRuntime.vacuumAutomationActive and Remotes.VacuumAction then
         pcall(function()
             Remotes.VacuumAction:FireServer("Stop")
         end)
     end
-    VacuumAutomationActive = false
+    ToolRuntime.vacuumAutomationActive = false
 end
 
 local function startVacuumAutomation()
-    if VacuumAutomationActive then return true end
+    if ToolRuntime.vacuumAutomationActive then return true end
     if not Remotes.VacuumAction or not isVacuumReady() then return false end
     if getCurrentEquippedSlot() ~= SLOT_VACUUM then return false end
     local ok = pcall(function()
         Remotes.VacuumAction:FireServer("Start")
     end)
-    VacuumAutomationActive = ok
+    ToolRuntime.vacuumAutomationActive = ok
     return ok
 end
 
@@ -1254,13 +1259,13 @@ local function harvestWithEquippedTool(primaryPart)
         end)
     end
 
-    stopVacuumAutomation()
+    ToolRuntime.stopVacuumAutomation()
     if activeSlot == SLOT_PITCHFORK and isToolOwned("Pitchfork") and Remotes.PitchforkDig then
         local cooldown = tonumber(LocalPlayer:GetAttribute("PitchforkCooldown"))
             or tonumber(HaystackConfig and HaystackConfig.PITCHFORK_COOLDOWN)
             or 0.85
-        if os.clock() - LastPitchforkDigAt < cooldown then return false end
-        LastPitchforkDigAt = os.clock()
+        if os.clock() - ToolRuntime.lastPitchforkDigAt < cooldown then return false end
+        ToolRuntime.lastPitchforkDigAt = os.clock()
         return pcall(function()
             Remotes.PitchforkDig:FireServer(hayId)
         end)
@@ -1278,12 +1283,14 @@ end
 -- SECTION 8: AUTOMATION ENGINES
 
 -- 8.1 FAST BATCH AUTO-FARM ENGINE (FULL RGB HUNTING + MULTI-GRAB + AUTO-SELL)
-local isCurrentlySelling = false
-local cachedRainbowStrands = {}
-local lastRainbowScanAt = 0
-local lastNoTeleportSellAttemptAt = 0
-local lastNoTeleportNoticeAt = 0
-local lastNoReachNoticeAt = 0
+local FarmRuntime = {
+    isCurrentlySelling = false,
+    cachedRainbowStrands = {},
+    lastRainbowScanAt = 0,
+    lastNoTeleportSellAttemptAt = 0,
+    lastNoTeleportNoticeAt = 0,
+    lastNoReachNoticeAt = 0,
+}
 
 -- Function to find ALL active Rainbow / RGB strands across the entire map
 local function getAllRainbowStrands()
@@ -1292,8 +1299,8 @@ local function getAllRainbowStrands()
     local rgbList = {}
     local now = os.clock()
 
-    if now - lastRainbowScanAt < 0.65 then
-        for _, part in ipairs(cachedRainbowStrands) do
+    if now - FarmRuntime.lastRainbowScanAt < 0.65 then
+        for _, part in ipairs(FarmRuntime.cachedRainbowStrands) do
             if part and ((part.Parent == haystack and type(part:GetAttribute("HayId")) == "number")
                 or part.Parent == dropped) and part:IsDescendantOf(workspace)
                 and getRareHayMultiplier(part) > 1 then
@@ -1302,7 +1309,7 @@ local function getAllRainbowStrands()
         end
         return rgbList
     end
-    lastRainbowScanAt = now
+    FarmRuntime.lastRainbowScanAt = now
 
     -- 1. Check all strands in HaystackClient (no limits / full map scan)
     if haystack then
@@ -1325,7 +1332,7 @@ local function getAllRainbowStrands()
         end
     end
 
-    cachedRainbowStrands = rgbList
+    FarmRuntime.cachedRainbowStrands = rgbList
     return rgbList
 end
 
@@ -1359,54 +1366,56 @@ end
 -- Keep the chosen dig area stable while the player moves. The known needle
 -- HayId identifies where to excavate; objective collection still uses the
 -- server's normal reveal and PickHay("Objective") flow.
-local cachedNeedleHayId = nil
-local cachedNeedleHayPart = nil
-local cachedNeedleTargetPosition = nil
-local lastNeedleHayLookupAt = 0
-local digSequence = 0
-local lastDigHayId = nil
-local AUTO_FARM_MIN_DWELL = 2.5
-local AUTO_FARM_MAX_DWELL = 8
-local AUTO_FARM_SECTOR_COUNT = 16
-local AUTO_FARM_TARGET_DEPTH = math.clamp(
-    tonumber(HaystackConfig and HaystackConfig.NEEDLE_REVEAL_FRACTION) or 0.75, 0.1, 1)
-local autoFarmCornerPosition = nil
-local autoFarmCornerStartedAt = 0
-local autoFarmCornerSector = nil
-local autoFarmCornerMode = nil
-local autoFarmVisitedSectors = {}
-local hayGeometryFolder = nil
-local hayGeometryCenter = nil
-local hayGeometryMinY = nil
-local hayGeometryMaxY = nil
-local hayGeometryUpperRadius = nil
-local lastHayGeometryAt = 0
+local FarmDigState = {
+    cachedNeedleHayId = nil,
+    cachedNeedleHayPart = nil,
+    cachedNeedleTargetPosition = nil,
+    lastNeedleHayLookupAt = 0,
+    digSequence = 0,
+    lastDigHayId = nil,
+    minDwell = 2.5,
+    maxDwell = 8,
+    sectorCount = 16,
+    targetDepth = math.clamp(
+        tonumber(HaystackConfig and HaystackConfig.NEEDLE_REVEAL_FRACTION) or 0.75, 0.1, 1),
+    cornerPosition = nil,
+    cornerStartedAt = 0,
+    cornerSector = nil,
+    cornerMode = nil,
+    visitedSectors = {},
+    hayGeometryFolder = nil,
+    hayGeometryCenter = nil,
+    hayGeometryMinY = nil,
+    hayGeometryMaxY = nil,
+    hayGeometryUpperRadius = nil,
+    lastHayGeometryAt = 0,
+}
 
 local function getKnownNeedleHayPart(haystack)
     local hayId = Landmarks.TargetNeedleHayId
     if not haystack or type(hayId) ~= "number" then return nil end
-    if cachedNeedleHayId ~= hayId then
-        cachedNeedleHayId = hayId
-        cachedNeedleHayPart = nil
-        cachedNeedleTargetPosition = nil
-        lastNeedleHayLookupAt = 0
+    if FarmDigState.cachedNeedleHayId ~= hayId then
+        FarmDigState.cachedNeedleHayId = hayId
+        FarmDigState.cachedNeedleHayPart = nil
+        FarmDigState.cachedNeedleTargetPosition = nil
+        FarmDigState.lastNeedleHayLookupAt = 0
         NeedleProtection.targetId = hayId
         NeedleProtection.anchor = nil
         NeedleProtection.localActions = 0
         NeedleProtection.ready = false
-        table.clear(autoFarmVisitedSectors)
+        table.clear(FarmDigState.visitedSectors)
         FarmProgressState.cycle = 1
     end
-    if cachedNeedleHayPart and cachedNeedleHayPart.Parent == haystack
-        and cachedNeedleHayPart:GetAttribute("HayId") == hayId then
-        return cachedNeedleHayPart
+    if FarmDigState.cachedNeedleHayPart and FarmDigState.cachedNeedleHayPart.Parent == haystack
+        and FarmDigState.cachedNeedleHayPart:GetAttribute("HayId") == hayId then
+        return FarmDigState.cachedNeedleHayPart
     end
-    if lastNeedleHayLookupAt > 0 and os.clock() - lastNeedleHayLookupAt < 2 then return nil end
-    lastNeedleHayLookupAt = os.clock()
+    if FarmDigState.lastNeedleHayLookupAt > 0 and os.clock() - FarmDigState.lastNeedleHayLookupAt < 2 then return nil end
+    FarmDigState.lastNeedleHayLookupAt = os.clock()
     for _, part in ipairs(haystack:GetChildren()) do
         if part:IsA("BasePart") and part:GetAttribute("HayId") == hayId then
-            cachedNeedleHayPart = part
-            cachedNeedleTargetPosition = part.Position
+            FarmDigState.cachedNeedleHayPart = part
+            FarmDigState.cachedNeedleTargetPosition = part.Position
             return part
         end
     end
@@ -1415,9 +1424,9 @@ end
 
 local function getHayGeometryCenter(haystack)
     if not haystack then return nil end
-    if haystack == hayGeometryFolder and hayGeometryCenter
-        and os.clock() - lastHayGeometryAt < 20 then
-        return hayGeometryCenter, hayGeometryMinY, hayGeometryMaxY, hayGeometryUpperRadius
+    if haystack == FarmDigState.hayGeometryFolder and FarmDigState.hayGeometryCenter
+        and os.clock() - FarmDigState.lastHayGeometryAt < 20 then
+        return FarmDigState.hayGeometryCenter, FarmDigState.hayGeometryMinY, FarmDigState.hayGeometryMaxY, FarmDigState.hayGeometryUpperRadius
     end
     local sumX, sumY, sumZ, count = 0, 0, 0, 0
     local minY, maxY = math.huge, -math.huge
@@ -1431,53 +1440,53 @@ local function getHayGeometryCenter(haystack)
             count = count + 1
         end
     end
-    hayGeometryFolder = haystack
-    lastHayGeometryAt = os.clock()
+    FarmDigState.hayGeometryFolder = haystack
+    FarmDigState.lastHayGeometryAt = os.clock()
     if count > 0 then
         local configuredCenter = HaystackConfig and HaystackConfig.PILE_CENTER
         if typeof(configuredCenter) == "Vector3" then
             -- The live centroid moves as hay disappears. Keep X/Z anchored to
             -- the server's pile center so angular sectors never drift or repeat.
-            hayGeometryCenter = Vector3.new(configuredCenter.X, sumY / count, configuredCenter.Z)
+            FarmDigState.hayGeometryCenter = Vector3.new(configuredCenter.X, sumY / count, configuredCenter.Z)
         else
-            hayGeometryCenter = Vector3.new(sumX / count, sumY / count, sumZ / count)
+            FarmDigState.hayGeometryCenter = Vector3.new(sumX / count, sumY / count, sumZ / count)
         end
-        hayGeometryMinY, hayGeometryMaxY = minY, maxY
+        FarmDigState.hayGeometryMinY, FarmDigState.hayGeometryMaxY = minY, maxY
         local midY = minY + (maxY - minY) * 0.5
         local upperRadius = 0
         for _, part in ipairs(parts) do
             if part:IsA("BasePart") and type(part:GetAttribute("HayId")) == "number"
                 and part.Position.Y >= midY then
-                local dx = part.Position.X - hayGeometryCenter.X
-                local dz = part.Position.Z - hayGeometryCenter.Z
+                local dx = part.Position.X - FarmDigState.hayGeometryCenter.X
+                local dz = part.Position.Z - FarmDigState.hayGeometryCenter.Z
                 upperRadius = math.max(upperRadius, math.sqrt(dx * dx + dz * dz))
             end
         end
-        hayGeometryUpperRadius = tonumber(HaystackConfig and HaystackConfig.PILE_RADIUS) or upperRadius
-        Landmarks.HayCenter = hayGeometryCenter
+        FarmDigState.hayGeometryUpperRadius = tonumber(HaystackConfig and HaystackConfig.PILE_RADIUS) or upperRadius
+        Landmarks.HayCenter = FarmDigState.hayGeometryCenter
     else
-        hayGeometryCenter = nil
-        hayGeometryMinY, hayGeometryMaxY, hayGeometryUpperRadius = nil, nil, nil
+        FarmDigState.hayGeometryCenter = nil
+        FarmDigState.hayGeometryMinY, FarmDigState.hayGeometryMaxY, FarmDigState.hayGeometryUpperRadius = nil, nil, nil
     end
-    return hayGeometryCenter, hayGeometryMinY, hayGeometryMaxY, hayGeometryUpperRadius
+    return FarmDigState.hayGeometryCenter, FarmDigState.hayGeometryMinY, FarmDigState.hayGeometryMaxY, FarmDigState.hayGeometryUpperRadius
 end
 
 local function getFarmSector(position, center)
     if typeof(position) ~= "Vector3" or typeof(center) ~= "Vector3" then return nil end
     local angle = math.atan2(position.Z - center.Z, position.X - center.X)
     local normalized = (angle + math.pi * 2) % (math.pi * 2)
-    return math.floor(normalized / (math.pi * 2) * AUTO_FARM_SECTOR_COUNT) + 1
+    return math.floor(normalized / (math.pi * 2) * FarmDigState.sectorCount) + 1
 end
 
 local function chooseSmartHayPart(candidates, origin, maxDistance, haystack, respectCoverage)
     if not haystack then return nil end
     local center, minY, maxY, upperRadius = getHayGeometryCenter(haystack)
-    local targetAngle = (digSequence * 2.399963229728653 + math.sin(digSequence * 1.618) * 0.17)
+    local targetAngle = (FarmDigState.digSequence * 2.399963229728653 + math.sin(FarmDigState.digSequence * 1.618) * 0.17)
         % (math.pi * 2)
     local heightSpan = minY and maxY and (maxY - minY) or 0
     local minimumDigY = minY and (minY + heightSpan * 0.5) or -math.huge
-    local targetDigY = minY and (minY + heightSpan * (0.64 + 0.12 * math.sin(digSequence * 1.414))) or 0
-    local rimTarget = (upperRadius or 0) * (0.78 + 0.07 * math.sin(digSequence * 0.87))
+    local targetDigY = minY and (minY + heightSpan * (0.64 + 0.12 * math.sin(FarmDigState.digSequence * 1.414))) or 0
+    local rimTarget = (upperRadius or 0) * (0.78 + 0.07 * math.sin(FarmDigState.digSequence * 0.87))
     local chosen, bestScore = nil, -math.huge
 
     for _, part in ipairs(candidates) do
@@ -1487,12 +1496,12 @@ local function chooseSmartHayPart(candidates, origin, maxDistance, haystack, res
             local distance = offset.Magnitude
             local sector = getFarmSector(part.Position, center)
             local depth = respectCoverage and getDigDepthFraction(part.Position) or nil
-            local alreadyCovered = respectCoverage and sector and autoFarmVisitedSectors[sector]
-            local deepEnough = respectCoverage and depth and depth >= AUTO_FARM_TARGET_DEPTH
+            local alreadyCovered = respectCoverage and sector and FarmDigState.visitedSectors[sector]
+            local deepEnough = respectCoverage and depth and depth >= FarmDigState.targetDepth
             if distance <= maxDistance and not alreadyCovered and not deepEnough
                 and (heightSpan < 1.5 or part.Position.Y >= minimumDigY) then
                 local score = -distance * 0.03 - math.abs(part.Position.Y - targetDigY) * 0.7
-                if part:GetAttribute("HayId") == lastDigHayId then score = score - 25 end
+                if part:GetAttribute("HayId") == FarmDigState.lastDigHayId then score = score - 25 end
                 if center then
                     local dx, dz = part.Position.X - center.X, part.Position.Z - center.Z
                     local radius = math.sqrt(dx * dx + dz * dz)
@@ -1518,7 +1527,7 @@ local function chooseLocalHayPart(candidates, origin, maxDistance, haystack, exc
                 local distance = (part.Position - origin).Magnitude
                 if distance <= maxDistance then
                     local score = -distance - math.abs(part.Position.Y - origin.Y) * 0.12
-                    if hayId == lastDigHayId then score = score - 8 end
+                    if hayId == FarmDigState.lastDigHayId then score = score - 8 end
                     if score > bestScore then chosen, bestScore = part, score end
                 end
             end
@@ -1528,30 +1537,30 @@ local function chooseLocalHayPart(candidates, origin, maxDistance, haystack, exc
 end
 
 local function markCurrentFarmSectorVisited()
-    if autoFarmCornerMode == "coverage" and autoFarmCornerSector then
-        autoFarmVisitedSectors[autoFarmCornerSector] = true
+    if FarmDigState.cornerMode == "coverage" and FarmDigState.cornerSector then
+        FarmDigState.visitedSectors[FarmDigState.cornerSector] = true
     end
 end
 
 local function clearAutoFarmCorner(markVisited)
     if markVisited then markCurrentFarmSectorVisited() end
-    autoFarmCornerPosition = nil
-    autoFarmCornerStartedAt = 0
-    autoFarmCornerSector = nil
-    autoFarmCornerMode = nil
+    FarmDigState.cornerPosition = nil
+    FarmDigState.cornerStartedAt = 0
+    FarmDigState.cornerSector = nil
+    FarmDigState.cornerMode = nil
     FarmProgressState.localDepth = nil
     FarmProgressState.sector = nil
     FarmProgressState.target = "aguardando"
 end
 
 local function setAutoFarmCorner(position, sector, mode)
-    autoFarmCornerPosition = position
-    autoFarmCornerStartedAt = os.clock()
-    autoFarmCornerSector = sector
-    autoFarmCornerMode = mode or "coverage"
+    FarmDigState.cornerPosition = position
+    FarmDigState.cornerStartedAt = os.clock()
+    FarmDigState.cornerSector = sector
+    FarmDigState.cornerMode = mode or "coverage"
     FarmProgressState.localDepth = getDigDepthFraction(position)
     FarmProgressState.sector = sector
-    FarmProgressState.target = autoFarmCornerMode == "needle"
+    FarmProgressState.target = FarmDigState.cornerMode == "needle"
         and (IS_BASEMENT and "regiao da chave" or "regiao da agulha") or "cobertura"
 end
 
@@ -1615,13 +1624,13 @@ end
 local function getNeedleDigAnchor(haystack)
     if isNeedleAlreadyRevealed() then return nil end
     local targetPart = getKnownNeedleHayPart(haystack)
-    if targetPart then cachedNeedleTargetPosition = targetPart.Position end
-    if not cachedNeedleTargetPosition then
-        cachedNeedleTargetPosition = getNeedleSlotAnchor()
+    if targetPart then FarmDigState.cachedNeedleTargetPosition = targetPart.Position end
+    if not FarmDigState.cachedNeedleTargetPosition then
+        FarmDigState.cachedNeedleTargetPosition = getNeedleSlotAnchor()
     end
     NeedleProtection.targetId = Landmarks.TargetNeedleHayId
-    NeedleProtection.anchor = cachedNeedleTargetPosition
-    return cachedNeedleTargetPosition, targetPart
+    NeedleProtection.anchor = FarmDigState.cachedNeedleTargetPosition
+    return FarmDigState.cachedNeedleTargetPosition, targetPart
 end
 
 local function selectNeedleAreaHay(haystack, anchor, targetPart)
@@ -1660,16 +1669,16 @@ local function chooseAutoFarmHayPart(haystack, hrp, reach)
     -- objective is revealed instead of merely giving that region a score bonus.
     local needleAnchor, targetPart = getNeedleDigAnchor(haystack)
     if needleAnchor then
-        if autoFarmCornerMode ~= "needle"
-            or not autoFarmCornerPosition
-            or (autoFarmCornerPosition - needleAnchor).Magnitude > 0.5 then
+        if FarmDigState.cornerMode ~= "needle"
+            or not FarmDigState.cornerPosition
+            or (FarmDigState.cornerPosition - needleAnchor).Magnitude > 0.5 then
             clearAutoFarmCorner(true)
             setAutoFarmCorner(needleAnchor, nil, "needle")
         end
         local needleDepth = getDigDepthFraction(needleAnchor)
         FarmProgressState.localDepth = needleDepth
         local requiredActions = tonumber(HaystackConfig and HaystackConfig.NEEDLE_LOCAL_PICKS_REQUIRED) or 18
-        if needleDepth and needleDepth >= AUTO_FARM_TARGET_DEPTH
+        if needleDepth and needleDepth >= FarmDigState.targetDepth
             and NeedleProtection.localActions >= requiredActions then
             NeedleProtection.ready = true
         end
@@ -1683,20 +1692,20 @@ local function chooseAutoFarmHayPart(haystack, hrp, reach)
             local shouldTeleport = (needleAreaTarget.Position - hrp.Position).Magnitude > reach
             return needleAreaTarget, shouldTeleport
         end
-    elseif autoFarmCornerMode == "needle" then
+    elseif FarmDigState.cornerMode == "needle" then
         clearAutoFarmCorner()
     end
 
     local now = os.clock()
-    if autoFarmCornerPosition and autoFarmCornerMode == "coverage" then
-        local elapsed = now - autoFarmCornerStartedAt
-        local depth = getDigDepthFraction(autoFarmCornerPosition)
+    if FarmDigState.cornerPosition and FarmDigState.cornerMode == "coverage" then
+        local elapsed = now - FarmDigState.cornerStartedAt
+        local depth = getDigDepthFraction(FarmDigState.cornerPosition)
         FarmProgressState.localDepth = depth
         local localTarget = chooseLocalHayPart(getNearbyHayParts(hrp.Position, reach, 0),
             hrp.Position, reach, haystack)
-        local stillNeedsDigging = depth and depth < AUTO_FARM_TARGET_DEPTH
-        if localTarget and (elapsed < AUTO_FARM_MIN_DWELL
-            or (stillNeedsDigging and elapsed < AUTO_FARM_MAX_DWELL)) then
+        local stillNeedsDigging = depth and depth < FarmDigState.targetDepth
+        if localTarget and (elapsed < FarmDigState.minDwell
+            or (stillNeedsDigging and elapsed < FarmDigState.maxDwell)) then
             return localTarget, false
         end
         -- No local hay, the reveal depth was reached, or the safety timeout
@@ -1704,15 +1713,15 @@ local function chooseAutoFarmHayPart(haystack, hrp, reach)
         clearAutoFarmCorner(true)
     end
 
-    digSequence = digSequence + 1
+    FarmDigState.digSequence = FarmDigState.digSequence + 1
     local nextTarget = chooseSmartHayPart(haystack:GetChildren(), hrp.Position,
         math.huge, haystack, true)
     if not nextTarget then
         -- Every still-viable upper-edge sector was covered. Only now begin a
         -- fresh pass; this is what prevents the old same-corners loop.
-        table.clear(autoFarmVisitedSectors)
+        table.clear(FarmDigState.visitedSectors)
         FarmProgressState.cycle = (FarmProgressState.cycle or 1) + 1
-        digSequence = digSequence + 1
+        FarmDigState.digSequence = FarmDigState.digSequence + 1
         nextTarget = chooseSmartHayPart(haystack:GetChildren(), hrp.Position,
             math.huge, haystack, true)
     end
@@ -1747,7 +1756,7 @@ chooseTntTarget = function(hrp)
     end
     if not HubState.NoTeleportMode then
         local needleAnchor = getNeedleDigAnchor(haystack)
-        local excavationTarget = needleAnchor or autoFarmCornerPosition
+        local excavationTarget = needleAnchor or FarmDigState.cornerPosition
         if excavationTarget and (excavationTarget - hrp.Position).Magnitude <= 32
             and solveTntVelocity(origin, excavationTarget) then
             return excavationTarget
@@ -1792,7 +1801,7 @@ local BasementPuzzleLabels = {
 }
 
 local function getBasementNextObjective()
-    if not IS_BASEMENT or not BasementPuzzlesFolder then return "Porão indisponivel", nil end
+    if not IS_BASEMENT or not BasementState.folder then return "Porão indisponivel", nil end
     local hayFolder = ReplicatedStorage:FindFirstChild("NeedleHaystack")
     local keyOwned = LocalPlayer:GetAttribute("NeedleOwned") == true
     local keyClaimed = hayFolder and hayFolder:GetAttribute("NeedleClaimed") == true
@@ -1802,24 +1811,24 @@ local function getBasementNextObjective()
         return "Encontre a chave no feno", target or getKnownNeedleHayPart(haystack)
     end
 
-    if BasementPuzzlesFolder:GetAttribute("LeverPuzzleSolved") ~= true then
+    if BasementState.folder:GetAttribute("LeverPuzzleSolved") ~= true then
         local worldPuzzles = workspace:FindFirstChild("Puzzles")
         local leverPuzzle = worldPuzzles and worldPuzzles:FindFirstChild("LeverPuzzle")
         local levers = leverPuzzle and leverPuzzle:FindFirstChild("Levers")
         for i = 1, 3 do
-            if BasementPuzzlesFolder:GetAttribute("Lever" .. i .. "Pulled") ~= true then
+            if BasementState.folder:GetAttribute("Lever" .. i .. "Pulled") ~= true then
                 return "Acione a alavanca " .. i, resolveWorldPart(levers and levers:FindFirstChild("Lever" .. i))
             end
         end
         return "Conclua o puzzle das alavancas", resolveWorldPart(leverPuzzle)
     end
 
-    local solvedCount = tonumber(BasementPuzzlesFolder:GetAttribute("SolvedPuzzleCount")) or 0
-    local requiredCount = tonumber(BasementPuzzlesFolder:GetAttribute("RequiredPuzzleCount")) or #BasementRequiredPuzzles
+    local solvedCount = tonumber(BasementState.folder:GetAttribute("SolvedPuzzleCount")) or 0
+    local requiredCount = tonumber(BasementState.folder:GetAttribute("RequiredPuzzleCount")) or #BasementState.requiredPuzzles
     if solvedCount < requiredCount then
         local worldPuzzles = workspace:FindFirstChild("Puzzles")
-        for _, puzzleId in ipairs(BasementRequiredPuzzles) do
-            local state = BasementPuzzleSnapshot and BasementPuzzleSnapshot[puzzleId]
+        for _, puzzleId in ipairs(BasementState.requiredPuzzles) do
+            local state = BasementState.snapshot and BasementState.snapshot[puzzleId]
             if type(state) ~= "table" or state.completed ~= true then
                 return "Resolva: " .. (BasementPuzzleLabels[puzzleId] or puzzleId),
                     resolveWorldPart(worldPuzzles and worldPuzzles:FindFirstChild(puzzleId))
@@ -1828,7 +1837,7 @@ local function getBasementNextObjective()
         return "Resolva os puzzles restantes", nil
     end
 
-    if BasementPuzzlesFolder:GetAttribute("EscapeReady") == true then
+    if BasementState.folder:GetAttribute("EscapeReady") == true then
         return "Abra a saida com a chave", findBasementTrapdoorPart()
     end
     return "Aguardando liberacao da saida", findBasementTrapdoorPart()
@@ -1842,21 +1851,21 @@ local basementLeverThread = task.spawn(function()
             and LocalPlayer:GetAttribute("NeedleOwned") == true
             and LocalPlayer:GetAttribute("CutsceneActive") ~= true
             and LocalPlayer:GetAttribute("NeedleInputLocked") ~= true
-            and BasementPuzzlesFolder and BasementPuzzlesFolder:GetAttribute("LeverPuzzleSolved") ~= true
-            and BasementPuzzleSnapshot and BasementPuzzleConfig
+            and BasementState.folder and BasementState.folder:GetAttribute("LeverPuzzleSolved") ~= true
+            and BasementState.snapshot and BasementState.config
             and os.clock() - lastAttemptAt >= 1.5 then
-            local actionRemote = BasementPuzzlesFolder:FindFirstChild("PuzzleAction")
-            local definition = BasementPuzzleConfig.Puzzles and BasementPuzzleConfig.Puzzles.LeverPuzzle
-            local folder = type(BasementPuzzleConfig.folderFor) == "function"
-                and BasementPuzzleConfig.folderFor("LeverPuzzle") or nil
-            local snapshot = BasementPuzzleSnapshot.LeverPuzzle
+            local actionRemote = BasementState.folder:FindFirstChild("PuzzleAction")
+            local definition = BasementState.config.Puzzles and BasementState.config.Puzzles.LeverPuzzle
+            local folder = type(BasementState.config.folderFor) == "function"
+                and BasementState.config.folderFor("LeverPuzzle") or nil
+            local snapshot = BasementState.snapshot.LeverPuzzle
             local hrp = getHRP()
             if actionRemote and actionRemote:IsA("RemoteEvent") and definition and folder and hrp
                 and type(snapshot) == "table" and snapshot.completed ~= true then
                 for _, step in ipairs(definition.Steps or {}) do
                     local done = type(snapshot.steps) == "table" and snapshot.steps[step.Id] ~= nil
-                    if not done and type(BasementPuzzleConfig.resolve) == "function" then
-                        local model = BasementPuzzleConfig.resolve(folder, step.Model)
+                    if not done and type(BasementState.config.resolve) == "function" then
+                        local model = BasementState.config.resolve(folder, step.Model)
                         local part = resolveWorldPart(model)
                         local reach = tonumber(definition.InteractDistance) or 14
                         local camera = workspace.CurrentCamera
@@ -1867,8 +1876,8 @@ local basementLeverThread = task.spawn(function()
                             lastAttemptAt = os.clock()
                             pcall(function() actionRemote:FireServer("LeverPuzzle", step.Id) end)
                             task.delay(0.4, function()
-                                if IsHubLoaded and PuzzleStateRemote then
-                                    pcall(function() PuzzleStateRemote:FireServer() end)
+                                if IsHubLoaded and BasementState.remote then
+                                    pcall(function() BasementState.remote:FireServer() end)
                                 end
                             end)
                             break
@@ -1896,9 +1905,9 @@ local farmThread = task.spawn(function()
 
         local basementExitReady = IS_BASEMENT and HubState.AutoWinNeedle
             and LocalPlayer:GetAttribute("NeedleOwned") == true
-            and BasementPuzzlesFolder and BasementPuzzlesFolder:GetAttribute("EscapeReady") == true
-        if (HubState.AutoFarmHay or HubState.AutoSell) and IS_GAMEPLAY and not isCurrentlySelling
-            and not TntComboInProgress and not basementExitReady then
+            and BasementState.folder and BasementState.folder:GetAttribute("EscapeReady") == true
+        if (HubState.AutoFarmHay or HubState.AutoSell) and IS_GAMEPLAY and not FarmRuntime.isCurrentlySelling
+            and not ToolRuntime.tntComboInProgress and not basementExitReady then
             local hrp = getHRP()
             local char = getCharacter()
 
@@ -1908,24 +1917,24 @@ local farmThread = task.spawn(function()
 
                 -- FULL BAG CHECK -> COMPLETE AUTONOMOUS SELL CYCLE
                 if currentHay >= maxCap and maxCap > 0 and not HubState.AutoSell then
-                    stopVacuumAutomation()
+                    ToolRuntime.stopVacuumAutomation()
                 elseif currentHay >= maxCap and maxCap > 0 and HubState.AutoSell then
-                    stopVacuumAutomation()
+                    ToolRuntime.stopVacuumAutomation()
                     if HubState.NoTeleportMode then
                         local now = os.clock()
                         local sellDistance = (hrp.Position - Landmarks.SellCow).Magnitude
                         local sellReach = (tonumber(HaystackConfig and HaystackConfig.SELL_INTERACT_DISTANCE) or 20) + 5
                         if Remotes.SellHay and sellDistance <= sellReach
-                            and now - lastNoTeleportSellAttemptAt >= 1.25 then
-                            lastNoTeleportSellAttemptAt = now
+                            and now - FarmRuntime.lastNoTeleportSellAttemptAt >= 1.25 then
+                            FarmRuntime.lastNoTeleportSellAttemptAt = now
                             pcall(function() Remotes.SellHay:FireServer() end)
                         end
-                        if now - lastNoTeleportNoticeAt >= 8 then
-                            lastNoTeleportNoticeAt = now
+                        if now - FarmRuntime.lastNoTeleportNoticeAt >= 8 then
+                            FarmRuntime.lastNoTeleportNoticeAt = now
                             addLog("info", string.format("Bolsa cheia. Para vender sem teleporte, aproxime-se e olhe para a vaca (%.0f studs).", sellDistance))
                         end
                     else
-                        isCurrentlySelling = true
+                        FarmRuntime.isCurrentlySelling = true
                         addLog("info", "Bag full (" .. currentHay .. "/" .. maxCap .. "). Travelling to Sell Cow...")
 
                         local farmReturnCFrame = hrp.CFrame
@@ -1946,7 +1955,7 @@ local farmThread = task.spawn(function()
                         addLog("info", "Hay sold! Returning to harvest...")
                         teleportTo(farmReturnCFrame)
                         task.wait(0.12)
-                        isCurrentlySelling = false
+                        FarmRuntime.isCurrentlySelling = false
                     end
                 elseif HubState.AutoFarmHay then
                     -- 1. Intelligent Tool Recognition & Auto-Equip
@@ -2011,7 +2020,7 @@ local farmThread = task.spawn(function()
                             end
                         elseif rId then
                             if harvestWithEquippedTool(targetRgb) then
-                                lastDigHayId = rId
+                                FarmDigState.lastDigHayId = rId
                             end
                         end
                     else
@@ -2028,11 +2037,11 @@ local farmThread = task.spawn(function()
 
                                 local selectedHayId = primaryPart:GetAttribute("HayId")
                                 if harvestWithEquippedTool(primaryPart) then
-                                    lastDigHayId = selectedHayId
+                                    FarmDigState.lastDigHayId = selectedHayId
                                     recordNeedleAreaAction(primaryPart.Position, selectedHayId)
                                 end
-                            elseif HubState.NoTeleportMode and os.clock() - lastNoReachNoticeAt >= 8 then
-                                lastNoReachNoticeAt = os.clock()
+                            elseif HubState.NoTeleportMode and os.clock() - FarmRuntime.lastNoReachNoticeAt >= 8 then
+                                FarmRuntime.lastNoReachNoticeAt = os.clock()
                                 addLog("info", "Sem feno ao alcance da ferramenta. Aproxime-se do feno; seu personagem continua livre.")
                             end
                         end
@@ -2051,7 +2060,7 @@ local farmThread = task.spawn(function()
                 end
             end
         else
-            stopVacuumAutomation()
+            ToolRuntime.stopVacuumAutomation()
         end
     end
 end)
@@ -2063,9 +2072,9 @@ local tntThread = task.spawn(function()
         task.wait(1)
         local basementExitReady = IS_BASEMENT and HubState.AutoWinNeedle
             and LocalPlayer:GetAttribute("NeedleOwned") == true
-            and BasementPuzzlesFolder and BasementPuzzlesFolder:GetAttribute("EscapeReady") == true
-        if HubState.AutoUseTnt and IS_GAMEPLAY and not isCurrentlySelling
-            and not TntComboInProgress and not basementExitReady
+            and BasementState.folder and BasementState.folder:GetAttribute("EscapeReady") == true
+        if HubState.AutoUseTnt and IS_GAMEPLAY and not FarmRuntime.isCurrentlySelling
+            and not ToolRuntime.tntComboInProgress and not basementExitReady
             and not (NeedleProtection.anchor and not NeedleProtection.ready) then
             local hrp = getHRP()
             if hrp and isToolOwned("Tnt") then
@@ -2076,7 +2085,7 @@ local tntThread = task.spawn(function()
                     or tonumber(HaystackConfig and HaystackConfig.TNT_COOLDOWN)
                     or 20
                 local cd = math.max(serverCooldown, tonumber(HubState.TntInterval) or serverCooldown)
-                if (now - lastAutoTntThrow) >= cd and (maxCap - currentHay) >= 10 then
+                if (now - ToolRuntime.lastAutoTntThrow) >= cd and (maxCap - currentHay) >= 10 then
                     local target = chooseTntTarget(hrp)
                     if target then throwTntAt(target) end
                 end
@@ -2153,7 +2162,7 @@ local needleThread = task.spawn(function()
 
             if needleOwned then
                 if IS_BASEMENT then
-                    local escapeReady = BasementPuzzlesFolder and BasementPuzzlesFolder:GetAttribute("EscapeReady") == true
+                    local escapeReady = BasementState.folder and BasementState.folder:GetAttribute("EscapeReady") == true
                     if escapeReady then
                         equipToolSlot(SLOT_NEEDLE)
                         local trapdoorPart = findBasementTrapdoorPart()
@@ -2274,27 +2283,29 @@ local function parseShopPrice(rawPrice)
     return tonumber(cleaned)
 end
 
-local RobuxPriceCache = {}
-local RobuxPricePending = {}
-local RobuxPriceFailureAt = {}
+local RobuxPrices = {
+    cache = {},
+    pending = {},
+    failureAt = {},
+}
 local function getRobuxPrice(kind, productId)
     local id = tonumber(productId)
     if (kind ~= "Product" and kind ~= "GamePass") or not id or id <= 0 then return nil end
     local key = kind .. ":" .. tostring(id)
-    if RobuxPriceCache[key] == false and os.clock() - (RobuxPriceFailureAt[key] or 0) >= 30 then
-        RobuxPriceCache[key] = nil
+    if RobuxPrices.cache[key] == false and os.clock() - (RobuxPrices.failureAt[key] or 0) >= 30 then
+        RobuxPrices.cache[key] = nil
     end
-    if RobuxPriceCache[key] ~= nil then return RobuxPriceCache[key] or nil end
-    if not RobuxPricePending[key] then
-        RobuxPricePending[key] = true
+    if RobuxPrices.cache[key] ~= nil then return RobuxPrices.cache[key] or nil end
+    if not RobuxPrices.pending[key] then
+        RobuxPrices.pending[key] = true
         task.spawn(function()
             local marketplace = safeService("MarketplaceService")
             local infoType = kind == "GamePass" and Enum.InfoType.GamePass or Enum.InfoType.Product
             local ok, result = pcall(function() return marketplace:GetProductInfoAsync(id, infoType) end)
-            RobuxPricePending[key] = nil
+            RobuxPrices.pending[key] = nil
             if IsHubLoaded then
-                RobuxPriceCache[key] = (ok and type(result) == "table" and tonumber(result.PriceInRobux)) or false
-                if RobuxPriceCache[key] == false then RobuxPriceFailureAt[key] = os.clock() end
+                RobuxPrices.cache[key] = (ok and type(result) == "table" and tonumber(result.PriceInRobux)) or false
+                if RobuxPrices.cache[key] == false then RobuxPrices.failureAt[key] = os.clock() end
             end
         end)
     end
@@ -2846,7 +2857,7 @@ table.insert(HubThreads, espThread)
 -- 8.10 UNLOAD / DESTROY HUB
 local function unloadHub()
     addLog("warn", "Unloading Needle Hub completely...")
-    if stopVacuumAutomation then stopVacuumAutomation() end
+    if ToolRuntime.stopVacuumAutomation then ToolRuntime.stopVacuumAutomation() end
     IsHubLoaded = false
 
     for _, thread in ipairs(HubThreads) do
@@ -3039,12 +3050,14 @@ local function createFloatingToggleButton(toggleCallback)
 end
 
 -- Version & GitHub Update Status Store
-local RemoteScriptVersion = nil
-local RemoteGitCommitSha = nil
-local ScriptUpdateAvailable = false
-local ScriptUpdateNotice = "Aguardando consulta ao GitHub"
-local ScriptUpdateRequestId = 0
-local GitHubRawRoot = "https://raw.githubusercontent.com/victorcxzk/search-for-the-needle-script/"
+local ScriptUpdateState = {
+    remoteVersion = nil,
+    commitSha = nil,
+    available = false,
+    notice = "Aguardando consulta ao GitHub",
+    requestId = 0,
+    rawRoot = "https://raw.githubusercontent.com/victorcxzk/search-for-the-needle-script/",
+}
 
 local function versionCacheKey()
     return tostring(os.time()) .. "-" .. tostring(math.floor(os.clock() * 1000))
@@ -3082,13 +3095,13 @@ local function compareHubVersions(remote, installed)
 end
 
 local function checkForScriptUpdates(onFinished)
-    ScriptUpdateRequestId = ScriptUpdateRequestId + 1
-    local requestId = ScriptUpdateRequestId
-    ScriptUpdateNotice = "Consultando GitHub..."
+    ScriptUpdateState.requestId = ScriptUpdateState.requestId + 1
+    local requestId = ScriptUpdateState.requestId
+    ScriptUpdateState.notice = "Consultando GitHub..."
     task.spawn(function()
         local commitSha = readGitHubHeadSha()
         local success, res = pcall(function()
-            return game:HttpGet(GitHubRawRoot .. (commitSha or "master") .. "/version.json?cb=" .. versionCacheKey())
+            return game:HttpGet(ScriptUpdateState.rawRoot .. (commitSha or "master") .. "/version.json?cb=" .. versionCacheKey())
         end)
         local remoteVersion = nil
         local notice = nil
@@ -3118,11 +3131,11 @@ local function checkForScriptUpdates(onFinished)
         else
             notice = "Falha ao consultar GitHub"
         end
-        if requestId ~= ScriptUpdateRequestId then return end
-        RemoteGitCommitSha = commitSha
-        RemoteScriptVersion = remoteVersion
-        ScriptUpdateAvailable = available
-        ScriptUpdateNotice = notice
+        if requestId ~= ScriptUpdateState.requestId then return end
+        ScriptUpdateState.commitSha = commitSha
+        ScriptUpdateState.remoteVersion = remoteVersion
+        ScriptUpdateState.available = available
+        ScriptUpdateState.notice = notice
         addLog((available or not remoteVersion) and "warn" or "info", "Versao instalada v" .. SCRIPT_VERSION .. "; GitHub " ..
             (remoteVersion and ("v" .. remoteVersion) or "indisponivel") .. ": " .. notice)
         if onFinished then pcall(onFinished, notice, available, remoteVersion) end
@@ -4036,7 +4049,7 @@ local function buildNativeUI()
                 local bestSlot = getBestAvailableToolSlot()
                 equipToolSlot(bestSlot, true)
             else
-                stopVacuumAutomation()
+                ToolRuntime.stopVacuumAutomation()
                 clearAutoFarmCorner()
             end
             addLog("info", val and "Auto Farm ligado: TP automatico, raros, melhor ferramenta, TNT, gemas e drone."
@@ -4092,7 +4105,7 @@ local function buildNativeUI()
             end
         end, true)
         addNativeButton(farmTab, "Vender agora sem mover personagem", function()
-            stopVacuumAutomation()
+            ToolRuntime.stopVacuumAutomation()
             if Remotes.SellHay then Remotes.SellHay:FireServer() end
             addLog("info", "Venda solicitada sem teleporte. Se necessario, aproxime-se e olhe para a vaca.")
         end, true)
@@ -4207,7 +4220,7 @@ local function buildNativeUI()
             local keyCard = addNativeParagraph(basementTab, "Chave", "Carregando estado...", Color3.fromRGB(255, 190, 75))
             local leverCard = addNativeParagraph(basementTab, "Alavancas", "Carregando estado...", Color3.fromRGB(255, 190, 75))
             local puzzleCards = {}
-            for _, puzzleId in ipairs(BasementRequiredPuzzles) do
+            for _, puzzleId in ipairs(BasementState.requiredPuzzles) do
                 puzzleCards[puzzleId] = addNativeParagraph(basementTab,
                     BasementPuzzleLabels[puzzleId] or puzzleId, "Sincronizando puzzle...", Color3.fromRGB(99, 102, 241))
             end
@@ -4221,8 +4234,8 @@ local function buildNativeUI()
                 addLog("info", "Alavancas automaticas: " .. tostring(val))
             end)
             addNativeButton(basementTab, "Sincronizar progresso dos puzzles", function()
-                if PuzzleStateRemote and PuzzleStateRemote:IsA("RemoteEvent") then
-                    pcall(function() PuzzleStateRemote:FireServer() end)
+                if BasementState.remote and BasementState.remote:IsA("RemoteEvent") then
+                    pcall(function() BasementState.remote:FireServer() end)
                 else
                     addLog("warn", "PuzzleState nao esta disponivel neste servidor.")
                 end
@@ -4238,27 +4251,27 @@ local function buildNativeUI()
 
                     local pulled = 0
                     for i = 1, 3 do
-                        if BasementPuzzlesFolder and BasementPuzzlesFolder:GetAttribute("Lever" .. i .. "Pulled") == true then
+                        if BasementState.folder and BasementState.folder:GetAttribute("Lever" .. i .. "Pulled") == true then
                             pulled = pulled + 1
                         end
                     end
                     leverCard.Text = string.format("%d/3 acionadas | %s", pulled,
-                        BasementPuzzlesFolder and BasementPuzzlesFolder:GetAttribute("LeverPuzzleSolved") == true
+                        BasementState.folder and BasementState.folder:GetAttribute("LeverPuzzleSolved") == true
                             and "concluido" or "pendente")
 
-                    local solved = BasementPuzzlesFolder and tonumber(BasementPuzzlesFolder:GetAttribute("SolvedPuzzleCount")) or 0
-                    local required = BasementPuzzlesFolder and tonumber(BasementPuzzlesFolder:GetAttribute("RequiredPuzzleCount"))
-                        or #BasementRequiredPuzzles
+                    local solved = BasementState.folder and tonumber(BasementState.folder:GetAttribute("SolvedPuzzleCount")) or 0
+                    local required = BasementState.folder and tonumber(BasementState.folder:GetAttribute("RequiredPuzzleCount"))
+                        or #BasementState.requiredPuzzles
                     for puzzleId, card in pairs(puzzleCards) do
-                        local state = BasementPuzzleSnapshot and BasementPuzzleSnapshot[puzzleId]
+                        local state = BasementState.snapshot and BasementState.snapshot[puzzleId]
                         card.Text = type(state) == "table" and (state.completed == true and "Concluido pelo servidor."
                             or "Pendente. Interaja com as pistas e controles do puzzle.")
                             or "Estado individual ainda nao sincronizado."
                     end
-                    local escapeReady = BasementPuzzlesFolder and BasementPuzzlesFolder:GetAttribute("EscapeReady") == true
-                    local phase = BasementPuzzlesFolder and BasementPuzzlesFolder:GetAttribute("ReleasePhase") or "?"
+                    local escapeReady = BasementState.folder and BasementState.folder:GetAttribute("EscapeReady") == true
+                    local phase = BasementState.folder and BasementState.folder:GetAttribute("ReleasePhase") or "?"
                     exitCard.Text = string.format("Puzzles: %d/%d | Saida: %s | Fase: %s", solved or 0,
-                        required or #BasementRequiredPuzzles, escapeReady and "liberada" or "bloqueada", tostring(phase))
+                        required or #BasementState.requiredPuzzles, escapeReady and "liberada" or "bloqueada", tostring(phase))
                     nextCard.Text = getBasementNextObjective()
                     task.wait(1)
                 end
@@ -4412,9 +4425,9 @@ local function buildNativeUI()
 
         addNativeButton(setTab, "Atualizar / Recarregar Script (Auto-Download)", function()
             versionCard.Text = "Instalada: v" .. SCRIPT_VERSION .. "\nBaixando script do GitHub..."
-            local commitSha = readGitHubHeadSha() or RemoteGitCommitSha
+            local commitSha = readGitHubHeadSha() or ScriptUpdateState.commitSha
             local downloadOk, source = pcall(function()
-                return game:HttpGet(GitHubRawRoot .. (commitSha or "master") .. "/main.lua?cb=" .. versionCacheKey())
+                return game:HttpGet(ScriptUpdateState.rawRoot .. (commitSha or "master") .. "/main.lua?cb=" .. versionCacheKey())
             end)
             if not downloadOk or type(source) ~= "string" or #source == 0 then
                 versionCard.Text = "Instalada: v" .. SCRIPT_VERSION .. "\nFalha ao baixar. Tente novamente."
