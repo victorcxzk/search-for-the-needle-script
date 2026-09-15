@@ -1,5 +1,5 @@
 --[[
-    SEARCH FOR THE NEEDLE - ULTIMATE AUTOMATION HUB v6.22 PRO
+    SEARCH FOR THE NEEDLE - ULTIMATE AUTOMATION HUB v6.23 PRO
     Forensically Engineered from Luau Decompiler Bytecode Dump
     - Exact Multi-Grab Batching using LocalPlayer:GetAttribute("HayGrabCount") & getGrabCandidates
     - Rare / RGB priority via HayMutation and the game's value multipliers
@@ -131,7 +131,7 @@ else
     GAME_MODE_NAME = "Place " .. tostring(CURRENT_PLACE_ID)
 end
 local CURRENT_PLACE_NAME = GAME_MODE_NAME
-local SCRIPT_VERSION = "6.22"
+local SCRIPT_VERSION = "6.23"
 local CurrentContextMode = IS_LOBBY and "Lobby" or "Match"
 
 -- Require game Config if available for exact mathematical rainbow calculations
@@ -1937,61 +1937,67 @@ function Solver.picture(definition, state)
     return nil, "WAIT_SERVER"
 end
 
-function Solver.color(definition, state, search)
-    if state.completed == true then return nil, search, "DONE" end
+function Solver.colorBounds(definition)
     local minimum, maximum = tonumber(definition.MinCount), tonumber(definition.MaxCount)
     if not minimum or not maximum or minimum % 1 ~= 0 or maximum % 1 ~= 0
         or maximum < minimum or maximum - minimum > 19 then
-        return nil, search, "BAD_CONFIG"
+        return nil
     end
-    local steps, values = definition.Steps, state.values
-    if type(steps) ~= "table" or #steps == 0 or #steps > 8 or type(values) ~= "table" then
-        return nil, search, "WAIT_STATE"
-    end
-    local ids, vector = {}, {}
-    for index, step in ipairs(steps) do
-        if type(step.Id) ~= "string" then return nil, search, "BAD_CONFIG" end
-        ids[index] = step.Id
-        local value = values[step.Id]
-        if type(value) ~= "number" or value % 1 ~= 0 then return nil, search, "WAIT_STATE" end
-        if value < minimum or value > maximum then
-            -- Some rounds start with zero. Normalize it before enumerating.
-            if value ~= minimum - 1 then return nil, search, "BAD_STATE" end
-            return {kind = "Counter", puzzleId = "ColorPuzzle", stepId = step.Id,
-                model = step.Model, before = value, expected = minimum, normalize = true}, nil
-        end
-        vector[index] = value
-    end
-    if minimum == maximum then return nil, search, "WAIT_SERVER" end
-    local reset = not search or #search.ids ~= #ids or search.minimum ~= minimum or search.maximum ~= maximum
-    if not reset then
-        for index, id in ipairs(ids) do
-            if search.ids[index] ~= id or search.vector[index] ~= vector[index] then reset = true; break end
-        end
-    end
-    if reset then
-        search = {ids = ids, vector = table.clone(vector), start = table.clone(vector), cursor = 1,
-            minimum = minimum, maximum = maximum, actions = 0, total = (maximum - minimum + 1) ^ #ids}
-    end
-    if search.cursor > #ids then return nil, search, "EXHAUSTED" end
-    local index = search.cursor
-    return {kind = "Counter", puzzleId = "ColorPuzzle", stepId = ids[index], model = steps[index].Model,
-        before = vector[index], expected = vector[index] == maximum and minimum or vector[index] + 1,
-        colorIndex = index}, search
+    return minimum, maximum
 end
 
-function Solver.acceptColor(search, action, state)
-    if not search or action.normalize then return nil end
-    local values = state.values
-    if type(values) ~= "table" or values[action.stepId] ~= action.expected then return nil end
-    for index, id in ipairs(search.ids) do
-        if index ~= action.colorIndex and values[id] ~= search.vector[index] then return nil end
+-- Each configured Gems group is a clue, not another counter. The game marks
+-- whole gem models with ColorPuzzleVisible; count models, never their parts.
+function Solver.colorTargets(definition, groups)
+    local minimum, maximum = Solver.colorBounds(definition)
+    local steps = definition.Steps
+    if not minimum or type(steps) ~= "table" or #steps == 0 or #steps > 8 then
+        return nil, "BAD_CONFIG"
     end
-    search.vector[action.colorIndex] = action.expected
-    search.actions = search.actions + 1
-    -- Mixed-radix odometer: exhaust one counter before carrying to the next.
-    search.cursor = action.expected == search.start[action.colorIndex] and action.colorIndex + 1 or 1
-    return search
+    local targets = {}
+    for _, step in ipairs(steps) do
+        if type(step.Id) ~= "string" or targets[step.Id] ~= nil then return nil, "BAD_CONFIG" end
+        local gems = type(groups) == "table" and groups[step.Id]
+        if type(gems) ~= "table" or #gems == 0 then return nil, "WAIT_CLUE" end
+        local count = 0
+        for _, gem in ipairs(gems) do
+            if type(gem) ~= "table" or gem.loaded ~= true or type(gem.visible) ~= "boolean" then
+                return nil, "WAIT_CLUE"
+            end
+            if gem.visible then count = count + 1 end
+        end
+        if count < minimum or count > maximum then return nil, "BAD_CLUE" end
+        targets[step.Id] = count
+    end
+    return targets
+end
+
+function Solver.color(definition, state, targets)
+    if state.completed == true then return nil, "DONE" end
+    local minimum, maximum = Solver.colorBounds(definition)
+    local steps, values = definition.Steps, state.values
+    if not minimum or type(steps) ~= "table" or #steps == 0 or #steps > 8 then return nil, "BAD_CONFIG" end
+    if type(values) ~= "table" then return nil, "WAIT_STATE" end
+    if type(targets) ~= "table" then return nil, "WAIT_CLUE" end
+    -- Validate the entire live vector and clue before changing any counter.
+    for _, step in ipairs(steps) do
+        if type(step.Id) ~= "string" then return nil, "BAD_CONFIG" end
+        local goal, value = targets[step.Id], values[step.Id]
+        if type(goal) ~= "number" then return nil, "WAIT_CLUE" end
+        if goal % 1 ~= 0 or goal < minimum or goal > maximum then return nil, "BAD_CLUE" end
+        if type(value) ~= "number" or value % 1 ~= 0 then return nil, "WAIT_STATE" end
+        if value < minimum - 1 or value > maximum then return nil, "BAD_STATE" end
+    end
+    for _, step in ipairs(steps) do
+        local value, goal = values[step.Id], targets[step.Id]
+        if value ~= goal then
+            return {kind = "Counter", puzzleId = "ColorPuzzle", stepId = step.Id, model = step.Model,
+                before = value, expected = value < minimum and minimum
+                    or (value == maximum and minimum or value + 1), goal = goal}
+        end
+    end
+    -- Matching the clue is not a fabricated server completion flag.
+    return nil, "WAIT_SERVER"
 end
 
 function Solver.acknowledged(action, state)
@@ -2007,7 +2013,7 @@ function Solver.acknowledged(action, state)
     end
     if action.kind == "Counter" then
         return type(state.values) == "table" and type(state.values[action.stepId]) == "number"
-            and state.values[action.stepId] ~= action.before
+            and state.values[action.stepId] == action.expected
     end
     return false
 end
@@ -2106,7 +2112,10 @@ end
 function BasementSolver.resetRound()
     local automation = BasementState.automation
     automation.pending = nil
-    automation.colorSearch = nil
+    automation.colorClue = nil
+    automation.colorCounts = nil
+    automation.colorStream = nil
+    automation.colorClueIssue = nil
     automation.currentAction = nil
     automation.posterTaken = {}
     automation.numberCode = nil
@@ -2180,6 +2189,116 @@ function BasementSolver.posters(definition)
     end
     table.sort(result, function(a, b) return a.index < b.index end)
     return result
+end
+
+function BasementSolver.readColorTargets(definition)
+    local automation = BasementState.automation
+    automation.colorClueIssue = nil
+    local config, folder = BasementState.config, BasementSolver.worldFolder("ColorPuzzle")
+    local groups, sources, labels = {}, {folder}, {}
+    if type(definition.Steps) ~= "table" or #definition.Steps == 0 or #definition.Steps > 8 then
+        automation.colorClue = nil
+        automation.colorCounts = nil
+        return nil, "BAD_CONFIG"
+    end
+    if not folder or not config or type(config.resolve) ~= "function" then
+        automation.colorClue = nil
+        automation.colorCounts = nil
+        return nil, "WAIT_CLUE"
+    end
+    if workspace.StreamingEnabled then
+        local stream = automation.colorStream
+        if not stream or stream.folder ~= folder then
+            local anchor = resolveWorldPart(folder)
+            if not anchor then return nil, "WAIT_CLUE" end
+            stream = {folder = folder, ready = false}
+            automation.colorStream = stream
+            local position = anchor.Position
+            -- Loading the clue's area does not move the player. Do not count a
+            -- streamed-out gem as hidden just because the farm was far away.
+            local streamThread = task.spawn(function()
+                local ok = pcall(function() LocalPlayer:RequestStreamAroundAsync(position, 5) end)
+                if IsHubLoaded and automation.colorStream == stream then
+                    stream.ready, stream.finishedAt = ok, os.clock()
+                end
+            end)
+            table.insert(HubThreads, streamThread)
+            automation.colorClue = nil
+            return nil, "CLUE_SYNC"
+        end
+        if not stream.ready then
+            if stream.finishedAt and os.clock() - stream.finishedAt >= 5 then automation.colorStream = nil end
+            return nil, "CLUE_SYNC"
+        end
+        if os.clock() - stream.finishedAt < 1 then return nil, "CLUE_SYNC" end
+    end
+    local usedContainers = {}
+    for _, step in ipairs(definition.Steps) do
+        if type(step.Id) ~= "string" then
+            automation.colorClue = nil
+            automation.colorCounts = nil
+            return nil, "BAD_CONFIG"
+        end
+        local ok, container = false, nil
+        if step.Gems == nil then
+            automation.colorClue = nil
+            automation.colorCounts = nil
+            automation.colorClueIssue = "Configuracao sem grupo de gemas para " .. step.Id .. ". Nenhum valor sera testado."
+            return nil, "BAD_CONFIG"
+        end
+        ok, container = pcall(config.resolve, folder, step.Gems)
+        if not ok or typeof(container) ~= "Instance" or not container:IsDescendantOf(folder) then
+            automation.colorClue = nil
+            automation.colorCounts = nil
+            automation.colorClueIssue = "Grupo da pista " .. step.Id .. " ainda nao carregou."
+            return nil, "WAIT_CLUE"
+        end
+        if usedContainers[container] then
+            automation.colorClue = nil
+            automation.colorCounts = nil
+            return nil, "BAD_CLUE"
+        end
+        usedContainers[container] = true
+        table.insert(sources, container)
+        local gems = {}
+        for _, gem in ipairs(container:GetChildren()) do
+            if gem:IsA("Model") then
+                local visible = gem:GetAttribute("ColorPuzzleVisible")
+                if type(visible) ~= "boolean" then
+                    automation.colorClueIssue = "Gema de " .. step.Id .. " ainda sem atributo de visibilidade."
+                end
+                table.insert(gems, {visible = visible, loaded = visible == false or resolveWorldPart(gem) ~= nil})
+                table.insert(sources, gem)
+            end
+        end
+        groups[step.Id] = gems
+    end
+    local targets, reason = BasementSolver.colorTargets(definition, groups)
+    if not targets then
+        automation.colorClue = nil
+        automation.colorCounts = nil
+        return nil, reason
+    end
+    for _, step in ipairs(definition.Steps) do
+        table.insert(labels, step.Id .. "=" .. tostring(targets[step.Id]))
+    end
+    local signature = table.concat(labels, ", ")
+    automation.colorCounts = signature
+    local previous, now = automation.colorClue, os.clock()
+    local same = previous and previous.signature == signature and #previous.sources == #sources
+    if same then
+        for index, source in ipairs(sources) do
+            if previous.sources[index] ~= source then same = false; break end
+        end
+    end
+    if not same then
+        automation.colorClue = {signature = signature, sources = sources, since = now}
+        return nil, "CLUE_SYNC"
+    end
+    -- Never act on partially arriving/initializing clue models or stale round
+    -- counts. All groups and identities must settle before a counter is changed.
+    if now - previous.since < 1 then return nil, "CLUE_SYNC" end
+    return targets
 end
 
 function BasementSolver.position(action, definition)
@@ -2335,14 +2454,22 @@ function BasementSolver.tick()
         local state = BasementSolver.snapshot(pending.action.puzzleId)
         local token = BasementSolver.token(pending.action)
         if BasementSolver.acknowledged(pending.action, state) then
-            if pending.action.kind == "Counter" then
-                automation.colorSearch = BasementSolver.acceptColor(automation.colorSearch, pending.action, state)
-            end
             automation.attempts[token] = nil
             automation.blockedUntil[token] = nil
             automation.pending = nil
             automation.currentAction = nil
             automation.nextActionAt = now + 0.4
+        elseif pending.action.kind == "Counter" and state and type(state.values) == "table"
+            and type(state.values[pending.action.stepId]) == "number"
+            and state.values[pending.action.stepId] ~= pending.action.before then
+            -- Another click/player changed the counter unexpectedly. Re-read the
+            -- live value and clue; never advance a cached combination search.
+            automation.pending = nil
+            automation.currentAction = nil
+            automation.attempts[token] = nil
+            automation.blockedUntil[token] = nil
+            automation.nextActionAt = now + 0.4
+            automation.details.ColorPuzzle = "Contador alterado; relendo a pista e o valor atual."
         elseif pending.action.kind == "Submit" and (automation.submitRejectedAt or 0) >= pending.sentAt then
             automation.pending = nil
             automation.blockedUntil[token] = now + 15
@@ -2376,7 +2503,9 @@ function BasementSolver.tick()
             elseif id == "NumberPuzzle" then action, reason = BasementSolver.number(definition, state, BasementSolver.posters(definition))
             elseif id == "PicturePuzzle" then action, reason = BasementSolver.picture(definition, state)
             elseif id == "ColorPuzzle" then
-                action, automation.colorSearch, reason = BasementSolver.color(definition, state, automation.colorSearch)
+                local targets
+                targets, reason = BasementSolver.readColorTargets(definition)
+                if targets then action, reason = BasementSolver.color(definition, state, targets) end
             end
             if action then
                 local token = BasementSolver.token(action)
@@ -2385,8 +2514,8 @@ function BasementSolver.tick()
                     local ready, notice = BasementSolver.position(action, definition)
                     automation.status = (BasementPuzzleLabels[id] or "Alavancas") .. ": " .. (notice or "interagindo...")
                     automation.details[id] = notice or (id == "ColorPuzzle"
-                        and ("Busca controlada: " .. tostring(automation.colorSearch and automation.colorSearch.actions or 0)
-                            .. " acoes confirmadas.") or "Resolvendo automaticamente...")
+                        and ("Pista lida: " .. tostring(automation.colorCounts) .. ". Ajustando " .. action.stepId
+                            .. " para " .. tostring(action.goal) .. ".") or "Resolvendo automaticamente...")
                     if not ready then return end
                     local remote = BasementState.folder:FindFirstChild("PuzzleAction")
                     if not remote or not remote:IsA("RemoteEvent") then automation.status = "PuzzleAction indisponivel."; return end
@@ -2403,8 +2532,16 @@ function BasementSolver.tick()
             else
                 local notices = {WAIT_CODE = "Aguardando codigo/cartazes carregarem.", WAIT_STATE = "Aguardando estado completo.",
                     WAIT_SERVER = "Aguardando conclusao pelo servidor.", BAD_CONFIG = "Configuracao nao reconhecida.",
-                    BAD_STATE = "Contador fora do intervalo configurado.", EXHAUSTED = "Busca esgotada; precisamos revisar a pista."}
+                    BAD_STATE = "Contador fora do intervalo configurado.", WAIT_CLUE = "Aguardando gemas/pista de cores carregarem.",
+                    CLUE_SYNC = "Sincronizando pista de cores...", BAD_CLUE = "Pista de cores incompleta ou fora do intervalo."}
                 automation.details[id] = notices[reason] or "Aguardando..."
+                if id == "ColorPuzzle" and automation.colorClueIssue then
+                    automation.details[id] = automation.colorClueIssue
+                end
+                if id == "ColorPuzzle" and reason == "WAIT_SERVER" then
+                    automation.details[id] = "Contadores iguais a pista: " .. tostring(automation.colorCounts)
+                        .. ". Aguardando conclusao pelo servidor."
+                end
             end
         end
     end
@@ -4772,7 +4909,7 @@ local function buildNativeUI()
         if basementTab then
             addNativeSection(basementTab, "Capitulo 2: Porão", Color3.fromRGB(255, 190, 75))
             addNativeParagraph(basementTab, "Fluxo do capitulo",
-                "Auto Puzzles comeca nas alavancas 1, 2 e 3, espera a porta abrir e segue os puzzles na ordem do jogo. A chave nao e exigida para iniciar. Cores usa busca controlada e pode demorar.",
+                "Alavancas 1, 2 e 3, depois os puzzles na ordem do jogo. Cores conta as gemas visiveis da pista e ajusta os contadores; nao testa combinacoes.",
                 Color3.fromRGB(255, 190, 75))
             addNativeToggle(basementTab, "Auto Puzzles", HubState.BasementAutoPuzzles, function(val)
                 HubState.BasementAutoPuzzles = val

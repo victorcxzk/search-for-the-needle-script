@@ -98,61 +98,67 @@ function Solver.picture(definition, state)
     return nil, "WAIT_SERVER"
 end
 
-function Solver.color(definition, state, search)
-    if state.completed == true then return nil, search, "DONE" end
+function Solver.colorBounds(definition)
     local minimum, maximum = tonumber(definition.MinCount), tonumber(definition.MaxCount)
     if not minimum or not maximum or minimum % 1 ~= 0 or maximum % 1 ~= 0
         or maximum < minimum or maximum - minimum > 19 then
-        return nil, search, "BAD_CONFIG"
+        return nil
     end
-    local steps, values = definition.Steps, state.values
-    if type(steps) ~= "table" or #steps == 0 or #steps > 8 or type(values) ~= "table" then
-        return nil, search, "WAIT_STATE"
-    end
-    local ids, vector = {}, {}
-    for index, step in ipairs(steps) do
-        if type(step.Id) ~= "string" then return nil, search, "BAD_CONFIG" end
-        ids[index] = step.Id
-        local value = values[step.Id]
-        if type(value) ~= "number" or value % 1 ~= 0 then return nil, search, "WAIT_STATE" end
-        if value < minimum or value > maximum then
-            -- Some rounds start with zero. Normalize it before enumerating.
-            if value ~= minimum - 1 then return nil, search, "BAD_STATE" end
-            return {kind = "Counter", puzzleId = "ColorPuzzle", stepId = step.Id,
-                model = step.Model, before = value, expected = minimum, normalize = true}, nil
-        end
-        vector[index] = value
-    end
-    if minimum == maximum then return nil, search, "WAIT_SERVER" end
-    local reset = not search or #search.ids ~= #ids or search.minimum ~= minimum or search.maximum ~= maximum
-    if not reset then
-        for index, id in ipairs(ids) do
-            if search.ids[index] ~= id or search.vector[index] ~= vector[index] then reset = true; break end
-        end
-    end
-    if reset then
-        search = {ids = ids, vector = table.clone(vector), start = table.clone(vector), cursor = 1,
-            minimum = minimum, maximum = maximum, actions = 0, total = (maximum - minimum + 1) ^ #ids}
-    end
-    if search.cursor > #ids then return nil, search, "EXHAUSTED" end
-    local index = search.cursor
-    return {kind = "Counter", puzzleId = "ColorPuzzle", stepId = ids[index], model = steps[index].Model,
-        before = vector[index], expected = vector[index] == maximum and minimum or vector[index] + 1,
-        colorIndex = index}, search
+    return minimum, maximum
 end
 
-function Solver.acceptColor(search, action, state)
-    if not search or action.normalize then return nil end
-    local values = state.values
-    if type(values) ~= "table" or values[action.stepId] ~= action.expected then return nil end
-    for index, id in ipairs(search.ids) do
-        if index ~= action.colorIndex and values[id] ~= search.vector[index] then return nil end
+-- Each configured Gems group is a clue, not another counter. The game marks
+-- whole gem models with ColorPuzzleVisible; count models, never their parts.
+function Solver.colorTargets(definition, groups)
+    local minimum, maximum = Solver.colorBounds(definition)
+    local steps = definition.Steps
+    if not minimum or type(steps) ~= "table" or #steps == 0 or #steps > 8 then
+        return nil, "BAD_CONFIG"
     end
-    search.vector[action.colorIndex] = action.expected
-    search.actions = search.actions + 1
-    -- Mixed-radix odometer: exhaust one counter before carrying to the next.
-    search.cursor = action.expected == search.start[action.colorIndex] and action.colorIndex + 1 or 1
-    return search
+    local targets = {}
+    for _, step in ipairs(steps) do
+        if type(step.Id) ~= "string" or targets[step.Id] ~= nil then return nil, "BAD_CONFIG" end
+        local gems = type(groups) == "table" and groups[step.Id]
+        if type(gems) ~= "table" or #gems == 0 then return nil, "WAIT_CLUE" end
+        local count = 0
+        for _, gem in ipairs(gems) do
+            if type(gem) ~= "table" or gem.loaded ~= true or type(gem.visible) ~= "boolean" then
+                return nil, "WAIT_CLUE"
+            end
+            if gem.visible then count = count + 1 end
+        end
+        if count < minimum or count > maximum then return nil, "BAD_CLUE" end
+        targets[step.Id] = count
+    end
+    return targets
+end
+
+function Solver.color(definition, state, targets)
+    if state.completed == true then return nil, "DONE" end
+    local minimum, maximum = Solver.colorBounds(definition)
+    local steps, values = definition.Steps, state.values
+    if not minimum or type(steps) ~= "table" or #steps == 0 or #steps > 8 then return nil, "BAD_CONFIG" end
+    if type(values) ~= "table" then return nil, "WAIT_STATE" end
+    if type(targets) ~= "table" then return nil, "WAIT_CLUE" end
+    -- Validate the entire live vector and clue before changing any counter.
+    for _, step in ipairs(steps) do
+        if type(step.Id) ~= "string" then return nil, "BAD_CONFIG" end
+        local goal, value = targets[step.Id], values[step.Id]
+        if type(goal) ~= "number" then return nil, "WAIT_CLUE" end
+        if goal % 1 ~= 0 or goal < minimum or goal > maximum then return nil, "BAD_CLUE" end
+        if type(value) ~= "number" or value % 1 ~= 0 then return nil, "WAIT_STATE" end
+        if value < minimum - 1 or value > maximum then return nil, "BAD_STATE" end
+    end
+    for _, step in ipairs(steps) do
+        local value, goal = values[step.Id], targets[step.Id]
+        if value ~= goal then
+            return {kind = "Counter", puzzleId = "ColorPuzzle", stepId = step.Id, model = step.Model,
+                before = value, expected = value < minimum and minimum
+                    or (value == maximum and minimum or value + 1), goal = goal}
+        end
+    end
+    -- Matching the clue is not a fabricated server completion flag.
+    return nil, "WAIT_SERVER"
 end
 
 function Solver.acknowledged(action, state)
@@ -168,7 +174,7 @@ function Solver.acknowledged(action, state)
     end
     if action.kind == "Counter" then
         return type(state.values) == "table" and type(state.values[action.stepId]) == "number"
-            and state.values[action.stepId] ~= action.before
+            and state.values[action.stepId] == action.expected
     end
     return false
 end

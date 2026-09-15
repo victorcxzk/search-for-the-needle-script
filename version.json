@@ -1,7 +1,7 @@
 {
-  "version": "6.22",
-  "versionNumber": 82,
+  "version": "6.23",
+  "versionNumber": 83,
   "gameCompatibility": "Lobby/Farmhouse v1068; Basement PlaceVersion 510 (dump 2026-09-13)",
   "releaseDate": "2026-09-15",
-  "releaseNotes": "Restores whole-pile Auto Farm roaming instead of restricting digging to upper edges or pinning the route to the estimated needle/key location. Tracks 16 angular sectors across three height and three radial bands, keeps roughly 2.5 seconds of digging per point, and revisits live hay even above the reveal-depth threshold. Rare/RGB priority is no longer globally disabled by hidden-target protection; wide-tool/TNT protection is local to the target region. Preserves TNT low-arc aiming and Basement puzzle automation."
+  "releaseNotes": "Replaces Basement color combination enumeration with direct clue-derived counts. Reads each configured Gems group and counts whole models marked ColorPuzzleVisible, waits for complete/stable clues and streamed map loading, and advances only counters that differ from their clue. Handles counter wrap and re-reads unexpected other-player changes instead of advancing cached guesses. Shows the clue counts and waits for server-confirmed completion. Preserves whole-pile Auto Farm roaming, TNT and the other puzzle stages."
 }
